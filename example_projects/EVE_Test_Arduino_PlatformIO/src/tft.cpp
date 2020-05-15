@@ -441,7 +441,7 @@ void TFT_display(void)
 		}
 
 		EVE_cmd_dl(DL_BEGIN | EVE_BITMAPS);
-		EVE_cmd_dl(VERTEX2F(EVE_HSIZE - 105, (LAYOUT_Y1)));
+		EVE_cmd_dl(VERTEX2F(EVE_HSIZE / 2, EVE_VSIZE / 2));
 		EVE_cmd_dl(DL_END);
 
 		/* reset the transformation matrix to default values */
@@ -461,7 +461,7 @@ void TFT_display(void)
 		}
 		calc = new_offset-old_offset;
 		calc += 24; /* adjust for the commands that follow before the end */
-		EVE_cmd_number(120, EVE_VSIZE - 50, 26, EVE_OPT_RIGHTX, calc); /* number of bytes written to the cmd-fifo over the spi without adressing overhead */
+		EVE_cmd_number(120, EVE_VSIZE - 50, 26, EVE_OPT_RIGHTX, calc); /* number of bytes written to the cmd-fifo over the spi without addressing overhead */
 
 		EVE_cmd_dl(DL_DISPLAY);	/* instruct the graphics processor to show the list */
 		EVE_cmd_dl(CMD_SWAP); /* make this list active */

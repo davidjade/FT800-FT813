@@ -8,7 +8,7 @@
 @section info
 
 This file needs to be renamed to EVE_command.cpp for use with Arduino.
-At least für ATSAM I had the best result with -O2.
+At least fÃ¼r ATSAM I had the best result with -O2.
 The c-standard is C99.
 
 
@@ -199,127 +199,154 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR TH
 #include <stdarg.h>
 #endif
 
-/* EVE Memory Commands - used with EVE_memWritexx and EVE_memReadxx */
-#define MEM_WRITE	0x80 /* EVE Host Memory Write */
-#define MEM_READ	0x00 /* EVE Host Memory Read */
+// EVE Memory Commands - used with EVE_memWritexx and EVE_memReadxx
+#define MEM_WRITE		0x80 		// EVE Host Memory Write
+#define MEM_READ		0x00 		// EVE Host Memory Read
+#define MEM_WRITE_24 	0x800000	// EVE Host Memory Write (24-bit format)
 
 volatile uint16_t cmdOffset = 0x0000; /* offset for the 4k co-processor FIFO */
 
 volatile uint8_t cmd_burst = 0; /* flag to indicate cmd-burst is active */
 
+// Buffer for SPI transactions
+uint8_t SPIBuffer[SPI_BUFFER_SIZE];		// must be in DMA capable memory if DMA is used!
+uint16_t SPIBufferIndex = 0;
+
+// Macros to make SPI use explicit and less verbose
+// (macros do obscure code a little but they also help code search and readability)
+
+// Buffer a byte
+#define BUFFER_SPI_BYTE(byte) SPIBuffer[SPIBufferIndex++] = (byte);
+
+// Buffer a Word - little Endian format
+#define BUFFER_SPI_WORD(word) \
+	BUFFER_SPI_BYTE((uint8_t)(word)) \
+	BUFFER_SPI_BYTE((uint8_t)((word) >> 8))
+
+// Buffer a DWord - little Endian format
+#define BUFFER_SPI_DWORD(dword) \
+	BUFFER_SPI_BYTE((uint8_t)(dword)) \
+	BUFFER_SPI_BYTE((uint8_t)((dword) >> 8)) \
+	BUFFER_SPI_BYTE((uint8_t)((dword) >> 16)) \
+	BUFFER_SPI_BYTE((uint8_t)((dword) >> 24))
+
+// Buffer a 24-bit SPI Memory Write address - big Endian format
+#define BUFFER_SPI_WRITE_ADDRESS(addr) \
+	BUFFER_SPI_BYTE((uint8_t)((addr) >> 16) | MEM_WRITE) \
+	BUFFER_SPI_BYTE((uint8_t)((addr) >> 8)) \
+	BUFFER_SPI_BYTE((uint8_t)(addr))
+
+// Send buffer
+#define SEND_SPI_BUFFER() \
+	spi_transaction(SPIBuffer, SPIBufferIndex, SPI_SEND_QUEUED, NULL, 0); \
+	SPIBufferIndex = 0;
+
+// Wait for DMA queued SPI transactions to complete
+#define WAIT_SPI() \
+	spi_wait_for_pending_transactions();
+
 
 void EVE_cmdWrite(uint8_t command, uint8_t parameter)
 {
-	EVE_cs_set();
-	spi_transmit(command);
-	spi_transmit(parameter);
-	spi_transmit(0x00);
-	EVE_cs_clear();
+	const uint8_t data[] =
+	{
+		command,
+		parameter,
+		0x00
+	};
+
+	spi_transaction(data, sizeof(data), SPI_SEND_POLLING, NULL, 0);
 }
 
 
 uint8_t EVE_memRead8(uint32_t ftAddress)
 {
-	uint8_t ftData8;
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_READ); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress));	/* send low address byte */
-	spi_transmit(0x00);	/* send dummy byte */
-	ftData8 = spi_receive(0x00); /* read data byte by sending another dummy byte */
-	EVE_cs_clear();
-	return ftData8;	/* return byte read */
+	spi_read_data data = {};
+	spi_transaction(NULL, SPI_READ_BYTE_LEN, (spi_send_flag_t)(SPI_RECEIVE | SPI_SEND_POLLING | SPI_ADDRESS_24), &data, ftAddress);
+
+	return data.byte;	/* return byte read */
 }
 
 
 uint16_t EVE_memRead16(uint32_t ftAddress)
 {
-	uint16_t ftData16 = 0;
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_READ); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
-	spi_transmit(0x00);	/* send dummy byte */
-	ftData16 = (spi_receive(0x00));	/* read low byte */
-	ftData16 = (spi_receive(0x00) << 8) | ftData16;	/* read high byte */
-	EVE_cs_clear();
-	return ftData16; /* return integer read */
+	spi_read_data data = {};
+	spi_transaction(NULL, SPI_READ_WORD_LEN, (spi_send_flag_t)(SPI_RECEIVE | SPI_SEND_POLLING | SPI_ADDRESS_24), &data, ftAddress);
+
+	return data.word; /* return integer read */
 }
 
 
 uint32_t EVE_memRead32(uint32_t ftAddress)
 {
-	uint32_t ftData32= 0;
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_READ); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress));	/* send low address byte */
-	spi_transmit(0x00);	/* send dummy byte */
-	ftData32 = ((uint32_t)spi_receive(0x00)); /* read low byte */
-	ftData32 = ((uint32_t)spi_receive(0x00) << 8) | ftData32;
-	ftData32 = ((uint32_t)spi_receive(0x00) << 16) | ftData32;
-	ftData32 = ((uint32_t)spi_receive(0x00) << 24) | ftData32; /* read high byte */
-	EVE_cs_clear();
-	return ftData32; /* return long read */
+	spi_read_data data = {};
+	spi_transaction(NULL, SPI_READ_DWORD_LEN, (spi_send_flag_t)(SPI_RECEIVE | SPI_SEND_POLLING | SPI_ADDRESS_24), &data, ftAddress);
+
+	return data.dword; /* return long read */
 }
 
 
 void EVE_memWrite8(uint32_t ftAddress, uint8_t ftData8)
 {
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE);
-	spi_transmit((uint8_t)(ftAddress >> 8));
-	spi_transmit((uint8_t)(ftAddress));
-	spi_transmit(ftData8);
-	EVE_cs_clear();
+	spi_transaction(&ftData8, sizeof(ftData8), (spi_send_flag_t)(SPI_SEND_POLLING | SPI_ADDRESS_24), NULL, (ftAddress | MEM_WRITE_24));
 }
 
 
 void EVE_memWrite16(uint32_t ftAddress, uint16_t ftData16)
 {
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
-	spi_transmit((uint8_t)(ftData16)); /* send data low byte */
-	spi_transmit((uint8_t)(ftData16 >> 8));  /* send data high byte */
-	EVE_cs_clear();
+	spi_transaction((uint8_t*)&ftData16, sizeof(ftData16), (spi_send_flag_t)(SPI_SEND_POLLING | SPI_ADDRESS_24), NULL, (ftAddress | MEM_WRITE_24));
 }
 
 
 void EVE_memWrite32(uint32_t ftAddress, uint32_t ftData32)
 {
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
-	spi_transmit((uint8_t)(ftData32)); /* send data low byte */
-	spi_transmit((uint8_t)(ftData32 >> 8));
-	spi_transmit((uint8_t)(ftData32 >> 16));
-	spi_transmit((uint8_t)(ftData32 >> 24)); /* send data high byte */
-	EVE_cs_clear();
+	spi_transaction((uint8_t*)&ftData32, sizeof(ftData32), (spi_send_flag_t)(SPI_SEND_POLLING | SPI_ADDRESS_24), NULL, (ftAddress | MEM_WRITE_24));
 }
 
-
-void EVE_memWrite_flash_buffer(uint32_t ftAddress, const uint8_t *data, uint16_t len)
+#if	defined (__AVR__)
+// write to EVE memory via SPI memory-mapped protocol using queued SPI transactions (i.e. DMA)
+// Note: this version is for when you need to send PROGMEM - it makes a temp copy to make it DMA compatible
+void EVE_memWrite_flash_buffer(uint32_t ftAddress, const uint8_t *data, uint32_t len)
 {
-	uint16_t count;
+	// there really is no good solution for this since PROGMEM sits in a different address space with weird access rules so it must be copied to be SPI block compatible
+	uint8_t buffer[SPI_TRANSER_SIZE];	// warning - too large and this may blow your stack size
 
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE);
-	spi_transmit((uint8_t)(ftAddress >> 8));
-	spi_transmit((uint8_t)(ftAddress));
-
-	len = (len + 3)&(~3);
-
-	for(count=0;count<len;count++)
+	// chunk by DMA transfer size (SPI_TRANSER_SIZE)
+	uint32_t bytes_left = len;
+	while(bytes_left > 0)
 	{
-		spi_transmit(fetch_flash_byte(data+count));
+		uint32_t block_len = (bytes_left > SPI_TRANSER_SIZE ? SPI_TRANSER_SIZE : bytes_left);
+
+		#if defined(RAMPZ)
+			memcpy_PF(buffer, data, block_len);
+		#else
+			memcpy_P(buffer, data, block_len);
+		#endif
+
+		spi_transaction(buffer, block_len, (spi_send_flag_t)(SPI_SEND_QUEUED | SPI_ADDRESS_24), NULL, (ftAddress | MEM_WRITE_24));	
+		data += block_len;
+		ftAddress += block_len;
+		bytes_left -= block_len;
 	}
-
-	EVE_cs_clear();
 }
+#endif
 
+
+// write to EVE memory via SPI memory-mapped protocol using queued SPI transactions (i.e. DMA)
+// Note: data should be in DMA-capable memory! i.e. not for PROGMEM (use the flash version above)
+void EVE_memWrite_buffer(uint32_t ftAddress, const uint8_t *data, uint32_t len)
+{
+	// chunk by DMA transfer size (SPI_TRANSER_SIZE)
+	uint32_t bytes_left = len;
+	while(bytes_left > 0)
+	{
+		uint32_t block_len = (bytes_left > SPI_TRANSER_SIZE ? SPI_TRANSER_SIZE : bytes_left);
+		spi_transaction(data, block_len, (spi_send_flag_t)(SPI_SEND_QUEUED | SPI_ADDRESS_24), NULL, (ftAddress | MEM_WRITE_24));	
+		data += block_len;
+		ftAddress += block_len;
+		bytes_left -= block_len;
+	}
+}
 
 
 /* Check if the graphics processor completed executing the current command list. */
@@ -333,6 +360,8 @@ uint8_t EVE_busy(void)
 	{
 		return 1;
 	}
+	#else
+	WAIT_SPI();	// can't tell if EVE is busy if SPI is taking place
 	#endif
 
 	cmdBufferRead = EVE_memRead16(REG_CMD_READ); /* read the graphics processor read pointer */
@@ -342,12 +371,11 @@ uint8_t EVE_busy(void)
 		#if defined (BT81X_ENABLE)
 
 		uint16_t copro_patch_pointer;
-		uint32_t ftAddress;
-		
+
 		copro_patch_pointer = EVE_memRead16(REG_COPRO_PATCH_DTR);
 
 		#endif
-		
+
 		EVE_memWrite8(REG_CPURESET, 1);   /* hold co-processor engine in the reset condition */
 		EVE_memWrite16(REG_CMD_READ, 0);  /* set REG_CMD_READ to 0 */
 		EVE_memWrite16(REG_CMD_WRITE, 0); /* set REG_CMD_WRITE to 0 */
@@ -358,41 +386,32 @@ uint8_t EVE_busy(void)
 		#if defined (BT81X_ENABLE)
 
 		EVE_memWrite16(REG_COPRO_PATCH_DTR, copro_patch_pointer);
-		
+
 		DELAY_MS(5); /* just to be safe */
-		
-		ftAddress = EVE_RAM_CMD + cmdOffset;
 
-		EVE_cs_set();
-		spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-		spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-		spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
+		// reset the SPI buffer just to be cautious
+		SPIBufferIndex = 0;
 
-		spi_transmit((uint8_t)(CMD_FLASHATTACH));
-		spi_transmit((uint8_t)(CMD_FLASHATTACH >> 8));
-		spi_transmit((uint8_t)(CMD_FLASHATTACH >> 16));
-		spi_transmit((uint8_t)(CMD_FLASHATTACH >> 24));
+		BUFFER_SPI_WRITE_ADDRESS(EVE_RAM_CMD + cmdOffset)
+		BUFFER_SPI_DWORD(CMD_FLASHATTACH)
+		BUFFER_SPI_DWORD(CMD_FLASHFAST)
+		SEND_SPI_BUFFER()
+		WAIT_SPI()
 
-		spi_transmit((uint8_t)(CMD_FLASHFAST));
-		spi_transmit((uint8_t)(CMD_FLASHFAST >> 8));
-		spi_transmit((uint8_t)(CMD_FLASHFAST >> 16));
-		spi_transmit((uint8_t)(CMD_FLASHFAST >> 24));
-		EVE_cs_clear();
+		cmdOffset += 8;
 
-		cmdOffset = 8;
-
-		EVE_cs_set();
-		spi_transmit(MEM_WRITE | 0x30); /* send Memory Write plus high address byte of REG_CMD_WRITE for EVE81x */
-		spi_transmit(0x20);	/* send middle address byte of REG_CMD_WRITE for EVE81x */
-		spi_transmit(0xfc);	/* send low address byte of REG_CMD_WRITE for EVE81x */
-		spi_transmit((uint8_t)(cmdOffset));
-		spi_transmit((uint8_t)(cmdOffset >> 8));
-		EVE_cs_clear();
+		BUFFER_SPI_BYTE
+		BUFFER_SPI_BYTE(MEM_WRITE | 0x30); /* send Memory Write plus high address byte of REG_CMD_WRITE for EVE81x */
+		BUFFER_SPI_BYTE(0x20);	/* send middle address byte of REG_CMD_WRITE for EVE81x */
+		BUFFER_SPI_BYTE(0xfc);	/* send low address byte of REG_CMD_WRITE for EVE81x */
+		BUFFER_SPI_WORD(cmdOffset);
+		SEND_SPI_BUFFER()
+		WAIT_SPI()
 
 		EVE_memWrite8(REG_PCLK, EVE_PCLK); /* restore REG_PCLK in case it was set to zero by an error */
-		
+
 		DELAY_MS(5); /* just to be safe */
-		
+
 		#endif
 	}
 
@@ -414,6 +433,8 @@ uint32_t EVE_get_touch_tag(uint8_t num)
 	#if defined (EVE_DMA)
 	if(EVE_dma_busy)
 	{
+		// TODO: should the driver status be returned in transactions are pending? Does that matter? They could be in-flight meaning busy is about to happen.
+		// or maybe wait for pending and then continue?
 		return 0; /* just do nothing if a dma transfer is in progress */
 	}
 	#endif
@@ -455,38 +476,23 @@ void EVE_get_cmdoffset(void)
 /* make current value of cmdOffset available while limiting access to that var to the EVE_commands module */
 uint16_t EVE_report_cmdoffset(void)
 {
-	return (cmdOffset);
+	return cmdOffset;
 }
 
 
 void EVE_inc_cmdoffset(uint16_t increment)
 {
 	cmdOffset += increment;
-	cmdOffset &= 0x0fff;
+	cmdOffset &= 0x0fff;	// circular
 }
 
 
 /* order the command co-processor to start processing its FIFO queue and do not wait for completion */
 void EVE_cmd_start(void)
 {
-	uint32_t ftAddress;
+	WAIT_SPI();
 
-	#if defined (EVE_DMA)
-	if(EVE_dma_busy)
-	{
-		return; /* just do nothing if a dma transfer is in progress */
-	}
-	#endif
-
-	ftAddress = REG_CMD_WRITE; /* this changes between EVE 80x and 81x, so as a constant at compile-time the compiler should happily optimize away the following bit-shifting */
-
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress));      /* send low address byte */
-	spi_transmit((uint8_t)(cmdOffset));      /* send data low byte */
-	spi_transmit((uint8_t)(cmdOffset >> 8)); /* send data high byte */
-	EVE_cs_clear();
+	EVE_memWrite16(REG_CMD_WRITE, cmdOffset);
 }
 
 
@@ -501,22 +507,10 @@ void EVE_cmd_execute(void)
 /* begin a co-processor command, this is used for all non-display-list commands */
 void EVE_begin_cmd(uint32_t command)
 {
-	uint32_t ftAddress;
+	BUFFER_SPI_WRITE_ADDRESS(EVE_RAM_CMD + cmdOffset)
+	BUFFER_SPI_DWORD(command)
 
-	ftAddress = EVE_RAM_CMD + cmdOffset;
-	EVE_cs_set();
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress));      /* send low address byte */
-
-	spi_transmit((uint8_t)(command)); /* send data low byte */
-	/* current commands are 0xffffff00 to ffffff5f, so sending directly 0xff for the upper three bytes could be faster */
-	/* but as it turned out the code with this "optimization" in place is not a single byte shorter */ 
-	spi_transmit((uint8_t)(command >> 8));
-	spi_transmit((uint8_t)(command >> 16));
-	spi_transmit((uint8_t)(command >> 24)); /* send data high byte */
-
-	EVE_inc_cmdoffset(4);
+	EVE_inc_cmdoffset(4);	// only count the command size - not the write address directive
 }
 
 
@@ -527,20 +521,12 @@ void EVE_begin_cmd(uint32_t command)
 void EVE_cmd_memzero(uint32_t ptr, uint32_t num)
 {
 	EVE_begin_cmd(CMD_MEMZERO);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
-
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(num)
+	
 	EVE_inc_cmdoffset(8);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
@@ -548,105 +534,99 @@ void EVE_cmd_memzero(uint32_t ptr, uint32_t num)
 void EVE_cmd_memset(uint32_t ptr, uint8_t value, uint32_t num)
 {
 	EVE_begin_cmd(CMD_MEMSET);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit(value);
-	spi_transmit(0);
-	spi_transmit(0);
-	spi_transmit(0);
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(value)
+	BUFFER_SPI_DWORD(num)
 
 	EVE_inc_cmdoffset(12);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
 /* this is meant to be called outside display-list building, does not support cmd-burst */
-/*
+void block_transfer(const uint8_t *data, uint32_t len);	// forward ref
+
 void EVE_cmd_memwrite(uint32_t dest, uint32_t num, const uint8_t *data)
 {
 	EVE_begin_cmd(CMD_MEMWRITE);
-
-	spi_transmit((uint8_t)(dest));
-	spi_transmit((uint8_t)(dest >> 8));
-	spi_transmit((uint8_t)(dest >> 16));
-	spi_transmit((uint8_t)(dest >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
-
-	num = (num + 3)&(~3);
-
-	for(count=0;count<len;count++)
-	{
-		spi_transmit(pgm_read_byte_far(data+count));
-	}
-
-	EVE_inc_cmdoffset(8+len);
-
-	EVE_cs_clear();
+	BUFFER_SPI_DWORD(dest)
+	BUFFER_SPI_DWORD(num)
+	
+	EVE_inc_cmdoffset(8);
+	
+	SEND_SPI_BUFFER()
+	
+	block_transfer(data, num);	// block_transfer is immediate - make sure CMD buffer is prepared!
 }
-*/
+
 
 /* this is meant to be called outside display-list building, does not support cmd-burst */
 void EVE_cmd_memcpy(uint32_t dest, uint32_t src, uint32_t num)
 {
 	EVE_begin_cmd(CMD_MEMCPY);
-
-	spi_transmit((uint8_t)(dest));
-	spi_transmit((uint8_t)(dest >> 8));
-	spi_transmit((uint8_t)(dest >> 16));
-	spi_transmit((uint8_t)(dest >> 24));
-
-	spi_transmit((uint8_t)(src));
-	spi_transmit((uint8_t)(src >> 8));
-	spi_transmit((uint8_t)(src >> 16));
-	spi_transmit((uint8_t)(src >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
+	BUFFER_SPI_DWORD(dest)
+	BUFFER_SPI_DWORD(src)
+	BUFFER_SPI_DWORD(num)
 
 	EVE_inc_cmdoffset(12);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
-/* commands for loading image data into FT8xx memory: */
 
-void spi_flash_write(const uint8_t *data, uint16_t len)
+/* commands for loading image data into FT8xx CMD memory, with DWORD padding: */
+/* Note: these are immediate SPI transfers and assume the CMD buffer is prepared to process the data, etc... */
+#if	defined (__AVR__)
+void eve_spi_flash_CMD_write(uint64_t addr, const uint8_t *data, uint16_t len)
 {
-	uint16_t count;
-	uint8_t padding;
+	// this is really quite horrible but there's no easy way around it. PROGMEM is weird and has restrictive access requirements
+	// the choice is to either copy it or do it byte-by-byte. In the interested of speed, it is copied and sent as a block
 
-	padding = len & 0x03; /* 0, 1, 2 or 3 */
-	padding = 4-padding; /* 4, 3, 2 or 1 */
-	padding &= 3; /* 3, 2 or 1 */
+	// let the existing general purpose function copy and chuck it to keep from having to buffer a huge block
+	EVE_memWrite_flash_buffer(addr, data, len)
 
-	for(count=0;count<len;count++)
+	uint8_t padding = len & 0x03; /* 0, 1, 2 or 3 */
+	padding = 4 - padding; /* 4, 3, 2 or 1 */
+	padding &= 3; /* 3, 2, 1 or 0 */
+
+	// padding is another transaction and needs it's own address (this is a DMA requirement)
+	if(padding)
 	{
-		spi_transmit(fetch_flash_byte(data+count));
+		addr += len;
+	
+		uint8_t padData[4] = {0};
+		spi_transaction(padData, padding, (spi_send_flag_t)(SPI_SEND_QUEUED | SPI_ADDRESS_24), NULL, (addr | MEM_WRITE_24));	
+
+		len += padding;
 	}
 
-	len += padding;
+	EVE_inc_cmdoffset(len);
+}
+#endif
 
-	while(padding > 0)
+/* commands for loading image data into FT8xx CMD memory, with DWORD padding: */
+/* Note: these are immediate SPI transfers and assume the CMD buffer is prepared to process the data, etc... */
+// Note: data should be in DMA-capable memory! i.e. not for PROGMEM (use the flash version above)
+void eve_spi_CMD_write(uint64_t addr, const uint8_t *data, uint16_t len)
+{
+	// we can use a direct transaction because it is already chunked
+	spi_transaction(data, len, (spi_send_flag_t)(SPI_SEND_QUEUED | SPI_ADDRESS_24), NULL, (addr | MEM_WRITE_24));	
+
+	uint8_t padding = len & 0x03; /* 0, 1, 2 or 3 */
+	padding = 4 - padding; /* 4, 3, 2 or 1 */
+	padding &= 3; /* 3, 2, 1 or 0 */
+
+	// padding is another transaction and needs it's own address (this is a DMA requirement)
+	if(padding)
 	{
-		spi_transmit(0);
-		padding--;
+		addr += len;
+	
+		uint8_t padData[4] = {0};
+		spi_transaction(padData, padding, (spi_send_flag_t)(SPI_SEND_QUEUED | SPI_ADDRESS_24), NULL, (addr | MEM_WRITE_24));	
+
+		len += padding;
 	}
 
 	EVE_inc_cmdoffset(len);
@@ -655,25 +635,28 @@ void spi_flash_write(const uint8_t *data, uint16_t len)
 
 void block_transfer(const uint8_t *data, uint32_t len)
 {
+	WAIT_SPI();		// SPI commands must be in CMD buffer first
+
 	uint32_t bytes_left;
 
 	bytes_left = len;
 	while(bytes_left > 0)
 	{
 		uint32_t block_len;
-		uint32_t ftAddress;		
-		
-		block_len = bytes_left>3840 ? 3840:bytes_left;
+		block_len = (bytes_left > BLOCK_TRANSFER_SIZE ? BLOCK_TRANSFER_SIZE : bytes_left);
 
-		ftAddress = EVE_RAM_CMD + cmdOffset;
-		EVE_cs_set();
-		spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-		spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-		spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
-		spi_flash_write(data,block_len);
-		EVE_cs_clear();
+	// Note: this assumes any caller to block_transfer is using PROGMEM - not a good assumption but it's what the old code did.
+	// Ideally, there would be a flag or something to signal where the source data is located.
+#if	defined (__AVR__)
+		eve_spi_flash_CMD_write(EVE_RAM_CMD + cmdOffset, data, block_len);
+#else
+		eve_spi_CMD_write(EVE_RAM_CMD + cmdOffset, data, block_len);
+#endif
+
 		data += block_len;
 		bytes_left -= block_len;
+
+		// signal to process data
 		EVE_cmd_execute();
 	}
 }
@@ -683,16 +666,13 @@ void block_transfer(const uint8_t *data, uint32_t len)
 void EVE_cmd_inflate(uint32_t ptr, const uint8_t *data, uint16_t len)
 {
 	EVE_begin_cmd(CMD_INFLATE);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
+	BUFFER_SPI_DWORD(ptr)
 
 	EVE_inc_cmdoffset(4);
-	EVE_cs_clear();
 
-	block_transfer(data, len);
+	SEND_SPI_BUFFER()
+	
+	block_transfer(data, len);	// block_transfer is immediate - make sure CMD buffer is prepared!
 }
 
 
@@ -701,23 +681,16 @@ void EVE_cmd_inflate(uint32_t ptr, const uint8_t *data, uint16_t len)
 void EVE_cmd_inflate2(uint32_t ptr, uint32_t options, const uint8_t *data, uint16_t len)
 {
 	EVE_begin_cmd(CMD_INFLATE2);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(options));
-	spi_transmit((uint8_t)(options >> 8));
-	spi_transmit((uint8_t)(options >> 16));
-	spi_transmit((uint8_t)(options >> 24));
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(options)
 
 	EVE_inc_cmdoffset(8);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
 
 	if(options == 0) /* direct data, not by Media-FIFO or Flash */
 	{
-		block_transfer(data, len);
+		block_transfer(data, len);	// block_transfer is immediate - make sure CMD buffer is prepared!
 	}
 }
 #endif
@@ -727,19 +700,12 @@ void EVE_cmd_inflate2(uint32_t ptr, uint32_t options, const uint8_t *data, uint1
 void EVE_cmd_loadimage(uint32_t ptr, uint32_t options, const uint8_t *data, uint16_t len)
 {
 	EVE_begin_cmd(CMD_LOADIMAGE);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(options));
-	spi_transmit((uint8_t)(options >> 8));
-	spi_transmit((uint8_t)(options >> 16));
-	spi_transmit((uint8_t)(options >> 24));
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(options)
 
 	EVE_inc_cmdoffset(8);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
 
 	#if defined (BT81X_ENABLE)
 	if( ((options & EVE_OPT_MEDIAFIFO) == 0) && ((options & EVE_OPT_FLASH) == 0) )/* direct data, neither by Media-FIFO or from Flash */
@@ -747,7 +713,7 @@ void EVE_cmd_loadimage(uint32_t ptr, uint32_t options, const uint8_t *data, uint
 	if((options & EVE_OPT_MEDIAFIFO) == 0) /* direct data, not by Media-FIFO */
 	#endif
 	{
-		block_transfer(data, len);
+		block_transfer(data, len);	// block_transfer is immediate - make sure CMD buffer is prepared!
 	}
 }
 
@@ -757,19 +723,12 @@ void EVE_cmd_loadimage(uint32_t ptr, uint32_t options, const uint8_t *data, uint
 void EVE_cmd_mediafifo(uint32_t ptr, uint32_t size)
 {
 	EVE_begin_cmd(CMD_MEDIAFIFO);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(size));
-	spi_transmit((uint8_t)(size >> 8));
-	spi_transmit((uint8_t)(size >> 16));
-	spi_transmit((uint8_t)(size >> 24));
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(size)
 
 	EVE_inc_cmdoffset(8);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
 }
 #endif
 
@@ -778,15 +737,11 @@ void EVE_cmd_mediafifo(uint32_t ptr, uint32_t size)
 void EVE_cmd_interrupt(uint32_t ms)
 {
 	EVE_begin_cmd(CMD_INTERRUPT);
-
-	spi_transmit((uint8_t)(ms));
-	spi_transmit((uint8_t)(ms >> 8));
-	spi_transmit((uint8_t)(ms >> 16));
-	spi_transmit((uint8_t)(ms >> 24));
+	BUFFER_SPI_DWORD(ms)
 
 	EVE_inc_cmdoffset(4);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
@@ -794,20 +749,12 @@ void EVE_cmd_interrupt(uint32_t ms)
 void EVE_cmd_setfont(uint32_t font, uint32_t ptr)
 {
 	EVE_begin_cmd(CMD_SETFONT);
-
-	spi_transmit((uint8_t)(font));
-	spi_transmit((uint8_t)(font >> 8));
-	spi_transmit((uint8_t)(font >> 16));
-	spi_transmit((uint8_t)(font >> 24));
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
+	BUFFER_SPI_DWORD(font)
+	BUFFER_SPI_DWORD(ptr)
 
 	EVE_inc_cmdoffset(8);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
@@ -816,25 +763,13 @@ void EVE_cmd_setfont(uint32_t font, uint32_t ptr)
 void EVE_cmd_setfont2(uint32_t font, uint32_t ptr, uint32_t firstchar)
 {
 	EVE_begin_cmd(CMD_SETFONT2);
-
-	spi_transmit((uint8_t)(font));
-	spi_transmit((uint8_t)(font >> 8));
-	spi_transmit((uint8_t)(font >> 16));
-	spi_transmit((uint8_t)(font >> 24));
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(firstchar));
-	spi_transmit((uint8_t)(firstchar >> 8));
-	spi_transmit((uint8_t)(firstchar >> 16));
-	spi_transmit((uint8_t)(firstchar >> 24));
+	BUFFER_SPI_DWORD(font)
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(firstchar)
 
 	EVE_inc_cmdoffset(12);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 #endif
 
@@ -844,15 +779,11 @@ void EVE_cmd_setfont2(uint32_t font, uint32_t ptr, uint32_t firstchar)
 void EVE_cmd_setrotate(uint32_t r)
 {
 	EVE_begin_cmd(CMD_SETROTATE);
-
-	spi_transmit((uint8_t)(r));
-	spi_transmit((uint8_t)(r >> 8));
-	spi_transmit((uint8_t)(r >> 16));
-	spi_transmit((uint8_t)(r >> 24));
+	BUFFER_SPI_DWORD(r)
 
 	EVE_inc_cmdoffset(4);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 #endif
 
@@ -861,15 +792,11 @@ void EVE_cmd_setrotate(uint32_t r)
 void EVE_cmd_snapshot(uint32_t ptr)
 {
 	EVE_begin_cmd(CMD_SNAPSHOT);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
+	BUFFER_SPI_DWORD(ptr)
 
 	EVE_inc_cmdoffset(4);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
@@ -878,32 +805,16 @@ void EVE_cmd_snapshot(uint32_t ptr)
 void EVE_cmd_snapshot2(uint32_t fmt, uint32_t ptr, int16_t x0, int16_t y0, int16_t w0, int16_t h0)
 {
 	EVE_begin_cmd(CMD_SNAPSHOT2);
-
-	spi_transmit((uint8_t)(fmt));
-	spi_transmit((uint8_t)(fmt >> 8));
-	spi_transmit((uint8_t)(fmt >> 16));
-	spi_transmit((uint8_t)(fmt >> 24));
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(x0));
-	spi_transmit((uint8_t)(x0 >> 8));
-
-	spi_transmit((uint8_t)(y0));
-	spi_transmit((uint8_t)(y0 >> 8));
-
-	spi_transmit((uint8_t)(w0));
-	spi_transmit((uint8_t)(w0 >> 8));
-
-	spi_transmit((uint8_t)(h0));
-	spi_transmit((uint8_t)(h0 >> 8));
+	BUFFER_SPI_DWORD(fmt)
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
 
 	EVE_inc_cmdoffset(16);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 #endif
 
@@ -912,28 +823,16 @@ void EVE_cmd_snapshot2(uint32_t fmt, uint32_t ptr, int16_t x0, int16_t y0, int16
 void EVE_cmd_track(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t tag)
 {
 	EVE_begin_cmd(CMD_TRACK);
-
-	spi_transmit((uint8_t)(x0));
-	spi_transmit((uint8_t)(x0 >> 8));
-
-	spi_transmit((uint8_t)(y0));
-	spi_transmit((uint8_t)(y0 >> 8));
-
-	spi_transmit((uint8_t)(w0));
-	spi_transmit((uint8_t)(w0 >> 8));
-
-	spi_transmit((uint8_t)(h0));
-	spi_transmit((uint8_t)(h0 >> 8));
-
-	spi_transmit((uint8_t)(tag));
-	spi_transmit((uint8_t)(tag >> 8));
-
-	spi_transmit(0);
-	spi_transmit(0);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_WORD(tag)
+	BUFFER_SPI_WORD(0)
 
 	EVE_inc_cmdoffset(12);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 }
 
 
@@ -947,32 +846,20 @@ void EVE_cmd_track(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t tag)
 /* crc32 = EVE_cmd_memcrc(my_ptr_to_some_memory_region, some_amount_of_bytes); */
 uint32_t EVE_cmd_memcrc(uint32_t ptr, uint32_t num)
 {
-	uint16_t offset;
-
 	EVE_begin_cmd(CMD_MEMCRC);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
-
-	spi_transmit(0);
-	spi_transmit(0);
-	spi_transmit(0);
-	spi_transmit(0);
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(num)
+	BUFFER_SPI_DWORD(0)
 
 	EVE_inc_cmdoffset(8);
-	offset = cmdOffset;
+
+	uint16_t offset = cmdOffset;
 	EVE_inc_cmdoffset(4);
 
-	EVE_cs_clear();
-
+	SEND_SPI_BUFFER()
+	
 	EVE_cmd_execute();
+
 	return (EVE_memRead32(EVE_RAM_CMD + offset));
 }
 
@@ -981,14 +868,15 @@ uint32_t EVE_cmd_memcrc(uint32_t ptr, uint32_t num)
 /* address = EVE_cmd_getpr(); */
 uint32_t EVE_cmd_getptr(void)
 {
-	uint16_t offset;
-
 	EVE_begin_cmd(CMD_GETPTR);
 
-	offset = cmdOffset;
+	uint16_t offset = cmdOffset;
 	EVE_inc_cmdoffset(4);
-	EVE_cs_clear();
+	
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
+	
 	return (EVE_memRead32(EVE_RAM_CMD + offset));
 }
 
@@ -1002,47 +890,44 @@ uint32_t EVE_cmd_regread(uint32_t ptr)
 	uint16_t offset;
 
 	EVE_begin_cmd(CMD_REGREAD);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
+	BUFFER_SPI_DWORD(ptr)
 
 	EVE_inc_cmdoffset(4);
+	
 	offset = cmdOffset;
 	EVE_inc_cmdoffset(4);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
 
 	EVE_cmd_execute();
+
 	return (EVE_memRead32(EVE_RAM_CMD + offset));
 }
 
 
 /*
 	Get the properties of an image after a CMD_LOADIMAGE operation.
-	
+
 	uint32 pointer, width, height;
 	EVE_LIB_GetProps(&pointer, &width, &height);
 
 	uint32 width, height;
 	EVE_LIB_GetProps(0, &width, &height);
-	
+
 	this is meant to be called outside display-list building, it includes executing the command
 	and waiting for completion, does not support cmd-burst
 */
 void EVE_LIB_GetProps(uint32_t *pointer, uint32_t *width, uint32_t *height)
 {
-	uint16_t offset;
-
 	EVE_begin_cmd(CMD_GETPROPS);
 
-	offset = cmdOffset;
+	uint16_t offset = cmdOffset;
 	EVE_inc_cmdoffset(12);
 
-	EVE_cs_clear();
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
-	
+
 	if(pointer)
 	{
 		*pointer = EVE_memRead32(EVE_RAM_CMD + offset);
@@ -1107,31 +992,32 @@ uint8_t EVE_init(void)
 
 	EVE_pdn_set();
 	DELAY_MS(6); /* minimum time for power-down is 5ms */
+
 	EVE_pdn_clear();
 	DELAY_MS(21); /* minimum time to allow from rising PD_N to first access is 20ms */
 
-/*	EVE_cmdWrite(EVE_CORERST,0); */ /* reset, only required for warm-start if PowerDown line is not used */
+	/*	EVE_cmdWrite(EVE_CORERST,0); */ /* reset, only required for warm-start if PowerDown line is not used */
 
-	#if defined (EVE_HAS_CRYSTAL)
-	EVE_cmdWrite(EVE_CLKEXT,0);	/* setup EVE for external clock */
-	#else
-	EVE_cmdWrite(EVE_CLKINT,0);	/* setup EVE for internal clock */
-	#endif
+#if defined (EVE_HAS_CRYSTAL)
+	EVE_cmdWrite(EVE_CLKEXT, 0);	/* setup EVE for external clock */
+#else
+	EVE_cmdWrite(EVE_CLKINT, 0);	/* setup EVE for internal clock */
+#endif
 
-	#if defined (BT81X_ENABLE)
-	EVE_cmdWrite(EVE_CLKSEL,0x46); /* set clock to 72 MHz */
-	#endif
+#if defined (BT81X_ENABLE)
+	EVE_cmdWrite(EVE_CLKSEL ,0x46); /* set clock to 72 MHz */
+#endif
 
-	EVE_cmdWrite(EVE_ACTIVE,0);	/* start EVE */
+	EVE_cmdWrite(EVE_ACTIVE, 0);	/* start EVE */
 
 	/* BRT AN033 BT81X_Series_Programming_Guide V1.2 had a small change to chapter 2.4 "Initialization Sequence during Boot Up" */
-	/* Send Host command “ACTIVE” and wait for at least 300 milliseconds. */
+	/* Send Host command â€œACTIVEâ€ and wait for at least 300 milliseconds. */
 	/* Ensure that there is no SPI access during this time. */
 	/* I asked Bridgetek for clarification why this has been made stricter. */
 	/* From observation with quite a few of different displays I do not agree that either the 300ms are necessary or that */
 	/* *reading* the SPI while EVE inits itself is causing any issues. */
 	/* But since BT815 at 72MHz need 42ms anyways before they start to answer, here is my compromise, a fixed 40ms delay */
-	/* to provide at least a short moment of silence for EVE */		
+	/* to provide at least a short moment of silence for EVE */
 	DELAY_MS(40);
 
 	while(chipid != 0x7C) /* if chipid is not 0x7c, continue to read it until it is, EVE needs a moment for it's power on self-test and configuration */
@@ -1148,7 +1034,11 @@ uint8_t EVE_init(void)
 	timeout = 0;
 	while (0x00 != (EVE_memRead8(REG_CPURESET) & 0x03)) /* check if EVE is in working status */
 	{
+		#if defined (ESP_PLATFORM)
+		DELAY_MS(10);	// DMA background transfers need more time to complete
+		#else
 		DELAY_MS(1);
+		#endif
 		timeout++;
 		if(timeout > 50) /* experimental, 10 was the lowest value to get the BT815 started with, the touch-controller was the last to get out of reset */
 		{
@@ -1157,48 +1047,45 @@ uint8_t EVE_init(void)
 	}
 
 	/* tell EVE that we changed the frequency from default to 72MHz for BT8xx */
-	#if defined (BT81X_ENABLE)
+#if defined (BT81X_ENABLE)
 	EVE_memWrite32(REG_FREQUENCY, 72000000);
-	#endif
+#endif
 
 	/* we have a display with a Goodix GT911 / GT9271 touch-controller on it, so we patch our FT811 or FT813 according to AN_336 or setup a BT815 accordingly */
-	#if defined (EVE_HAS_GT911)
+#if defined (EVE_HAS_GT911)
 
 	#if defined (BT81X_ENABLE)
 		EVE_memWrite32(REG_TOUCH_CONFIG, 0x000005d1); /* switch to Goodix touch controller */
 	#else
-		uint32_t ftAddress;
 
 		EVE_get_cmdoffset();
-		ftAddress = EVE_RAM_CMD + cmdOffset;
 
-		EVE_cs_set();
-		spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-		spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-		spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
+		BUFFER_SPI_WRITE_ADDRESS(EVE_RAM_CMD + cmdOffset)
+		SEND_SPI_BUFFER()
+
 		spi_flash_write(EVE_GT911_data, EVE_GT911_len);
-		EVE_cs_clear();
+
 		EVE_cmd_execute();
 
 		EVE_memWrite8(REG_TOUCH_OVERSAMPLE, 0x0f); /* setup oversample to 0x0f as "hidden" in binary-blob for AN_336 */
 		EVE_memWrite16(REG_TOUCH_CONFIG, 0x05D0); /* write magic cookie as requested by AN_336 */
 
 		/* specific to the EVE2 modules from Matrix-Orbital we have to use GPIO3 to reset GT911 */
-		EVE_memWrite16(REG_GPIOX_DIR,0x8008); /* Reset-Value is 0x8000, adding 0x08 sets GPIO3 to output, default-value for REG_GPIOX is 0x8000 -> Low output on GPIO3 */
-		DELAY_MS(1); /* wait more than 100µs */
+		EVE_memWrite16(REG_GPIOX_DIR, 0x8008); /* Reset-Value is 0x8000, adding 0x08 sets GPIO3 to output, default-value for REG_GPIOX is 0x8000 -> Low output on GPIO3 */
+		DELAY_MS(1); /* wait more than 100Âµs */
 		EVE_memWrite8(REG_CPURESET, 0x00); /* clear all resets */
 		DELAY_MS(56); /* wait more than 55ms */
-		EVE_memWrite16(REG_GPIOX_DIR,0x8000); /* setting GPIO3 back to input */
+		EVE_memWrite16(REG_GPIOX_DIR, 0x8000); /* setting GPIO3 back to input */
 	#endif
-	#endif
+#endif
 
 	/*	EVE_memWrite8(REG_PCLK, 0x00);	*/	/* set PCLK to zero - don't clock the LCD until later, line disabled because zero is reset-default and we just did a reset */
 
-	#if defined (EVE_ADAM101)
+#if defined (EVE_ADAM101)
 	EVE_memWrite8(REG_PWM_DUTY, 0x80); /* turn off backlight for Glyn ADAM101 module, it uses inverted values */
-	#else
+#else
 	EVE_memWrite8(REG_PWM_DUTY, 0); /* turn off backlight for any other module */
-	#endif
+#endif
 
 	/* Initialize Display */
 	EVE_memWrite16(REG_HSIZE,   EVE_HSIZE);   /* active display width */
@@ -1236,14 +1123,14 @@ uint8_t EVE_init(void)
 	EVE_memWrite8(REG_GPIO, 0x80); /* enable the DISP signal to the LCD panel, it is set to output in REG_GPIO_DIR by default */
 	EVE_memWrite8(REG_PCLK, EVE_PCLK); /* now start clocking data to the LCD panel */
 
-	#if defined (EVE_ADAM101)
+#if defined (EVE_ADAM101)
 	EVE_memWrite8(REG_PWM_DUTY, 0x60); /* turn on backlight to 25% for Glyn ADAM101 module, it uses inverted values */
-	#else
+#else
 	EVE_memWrite8(REG_PWM_DUTY, 0x20); /* turn on backlight to 25% for any other module */
-	#endif
+#endif
 
 	timeout = 0;
-	while(EVE_busy() == 1) /* just to be safe, should not even enter the loop */
+	while(EVE_busy()) /* just to be safe, should not even enter the loop */
 	{
 		DELAY_MS(1);
 		timeout++;
@@ -1255,9 +1142,9 @@ uint8_t EVE_init(void)
 
 	EVE_get_cmdoffset(); /* just to be safe */
 
-	#if defined (EVE_DMA)
+#if defined (EVE_DMA)
 	EVE_init_dma(); /* prepare DMA */
-	#endif
+#endif
 
 	return 1;
 }
@@ -1270,25 +1157,10 @@ Be careful to not use any functions in the sequence that do not address the comm
 */
 void EVE_start_cmd_burst(void)
 {
-	uint32_t ftAddress;
-
 	cmd_burst = 42;
-	ftAddress = EVE_RAM_CMD + cmdOffset;
 
-	#if defined (EVE_DMA)
-
-	EVE_dma_buffer[0] = (uint8_t)(ftAddress >> 16) | MEM_WRITE;
-	EVE_dma_buffer[1] = (uint8_t)(ftAddress >> 8);
-	EVE_dma_buffer[2] = (uint8_t)(ftAddress);
-	EVE_dma_buffer_index = 3;
-
-	#else
-	EVE_cs_set();
-
-	spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-	spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-	spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
-	#endif
+	WAIT_SPI()	// it is important to wait before writing to the SPI buffer as it might be in a DMA transaction
+	BUFFER_SPI_WRITE_ADDRESS(EVE_RAM_CMD + cmdOffset)
 }
 
 
@@ -1296,39 +1168,20 @@ void EVE_end_cmd_burst(void)
 {
 	cmd_burst = 0;
 
-	#if defined (EVE_DMA)
-	EVE_start_dma_transfer(); /* begin DMA transfer */
-	#else
-	EVE_cs_clear();
-	#endif
+	SEND_SPI_BUFFER()
 }
 
 
 /* begin a co-processor command */
 void EVE_start_cmd(uint32_t command)
 {
-	if(cmd_burst == 0)
+	if(!cmd_burst)
 	{
-		uint32_t ftAddress;
-
-		ftAddress = EVE_RAM_CMD + cmdOffset;
-		EVE_cs_set();
-		spi_transmit((uint8_t)(ftAddress >> 16) | MEM_WRITE); /* send Memory Write plus high address byte */
-		spi_transmit((uint8_t)(ftAddress >> 8)); /* send middle address byte */
-		spi_transmit((uint8_t)(ftAddress)); /* send low address byte */
-
-		spi_transmit((uint8_t)(command)); /* send data low byte */
-		spi_transmit((uint8_t)(command >> 8));
-		spi_transmit((uint8_t)(command >> 16));
-		spi_transmit((uint8_t)(command >> 24)); /* send data high byte */
+		WAIT_SPI()	// it is important to wait before writing to the SPI buffer as it might be in a DMA transaction
+		BUFFER_SPI_WRITE_ADDRESS(EVE_RAM_CMD + cmdOffset)
 	}
-	else
-	{
-		spi_transmit_async((uint8_t)(command)); /* send data low byte */
-		spi_transmit_async((uint8_t)(command >> 8));
-		spi_transmit_async((uint8_t)(command >> 16));
-		spi_transmit_async((uint8_t)(command >> 24)); /* send data high byte */
-	}
+
+	BUFFER_SPI_DWORD(command)
 
 	EVE_inc_cmdoffset(4); /* update the command-ram pointer */
 }
@@ -1348,72 +1201,45 @@ void EVE_cmd_dl(uint32_t command)
 {
 	if(cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(command));	/* send data low byte */
-		spi_transmit_async((uint8_t)(command >> 8));
-		spi_transmit_async((uint8_t)(command >> 16));
-		spi_transmit_async((uint8_t)(command >> 24)); /* send data high byte */
+		BUFFER_SPI_DWORD(command)
+		
 		EVE_inc_cmdoffset(4); /* update the command-ram pointer */
 	}
 	else
 	{
 		EVE_start_cmd(command);
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 }
 
 
 /* write a string to co-processor memory in context of a command: no chip-select, just plain SPI-transfers */
+/* note: assumes cmdOffset is already DWORD aligned */
 void EVE_write_string(const char *text)
 {
 	uint8_t textindex = 0;
 	uint8_t padding = 0;
 	uint8_t *bytes = (uint8_t *) text; /* need to handle the array as bunch of bytes */
 
-	if(cmd_burst)
+	while(bytes[textindex] != 0)
 	{
-		while(bytes[textindex] != 0)
+		BUFFER_SPI_BYTE(bytes[textindex]);
+		textindex++;
+		if(textindex > 249 || SPIBufferIndex >= SPI_BUFFER_SIZE) /* there appears to be no end for the "string", or no more room in SPI buffer, so leave */
 		{
-			spi_transmit_async(bytes[textindex]);
-			textindex++;
-			if(textindex > 249) /* there appears to be no end for the "string", so leave */
-			{
-				break;
-			}
-		}
-
-		/* we need to transmit at least one 0x00 byte and up to four if the string happens to be 4-byte aligned already */
-		padding = textindex & 3;  /* 0, 1, 2 or 3 */
-		padding = 4-padding; /* 4, 3, 2 or 1 */
-		textindex += padding;
-
-		while(padding > 0)
-		{
-			spi_transmit_async(0);
-			padding--;
+			break;
 		}
 	}
-	else
+
+	/* we need to transmit at least one 0x00 byte and up to four if the string happens to be 4-byte aligned already */
+	padding = textindex & 3;  /* 0, 1, 2 or 3 */
+	padding = 4-padding; /* 4, 3, 2 or 1 */
+	textindex += padding;
+
+	while(padding > 0 && SPIBufferIndex < SPI_BUFFER_SIZE)
 	{
-		while(bytes[textindex] != 0)
-		{
-			spi_transmit(bytes[textindex]);
-			textindex++;
-			if(textindex > 249) /* there appears to be no end for the "string", so leave */
-			{
-				break;
-			}
-		}
-
-		/* we need to transmit at least one 0x00 byte and up to four if the string happens to be 4-byte aligned already */
-		padding = textindex & 3;  /* 0, 1, 2 or 3 */
-		padding = 4-padding; /* 4, 3, 2 or 1 */
-		textindex += padding;
-
-		while(padding > 0)
-		{
-			spi_transmit(0);
-			padding--;
-		}
+		BUFFER_SPI_BYTE(0);
+		padding--;
 	}
 
 	EVE_inc_cmdoffset(textindex);
@@ -1432,20 +1258,14 @@ void EVE_write_string(const char *text)
 void EVE_cmd_flashwrite(uint32_t ptr, uint32_t num, const uint8_t *data)
 {
 	EVE_begin_cmd(CMD_FLASHWRITE);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
-
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(num)
+	
 	EVE_inc_cmdoffset(8);
-	EVE_cs_clear();
 
+	SEND_SPI_BUFFER()
+
+	WAIT_SPI()
 	block_transfer(data, num);
 }
 
@@ -1458,24 +1278,14 @@ void EVE_cmd_flashwrite(uint32_t ptr, uint32_t num, const uint8_t *data)
 void EVE_cmd_flashread(uint32_t dest, uint32_t src, uint32_t num)
 {
 	EVE_begin_cmd(CMD_FLASHREAD);
-
-	spi_transmit((uint8_t)(dest));
-	spi_transmit((uint8_t)(dest >> 8));
-	spi_transmit((uint8_t)(dest >> 16));
-	spi_transmit((uint8_t)(dest >> 24));
-
-	spi_transmit((uint8_t)(src));
-	spi_transmit((uint8_t)(src >> 8));
-	spi_transmit((uint8_t)(src >> 16));
-	spi_transmit((uint8_t)(src >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
-
+	BUFFER_SPI_DWORD(dest)
+	BUFFER_SPI_DWORD(src)
+	BUFFER_SPI_DWORD(num)
+	
 	EVE_inc_cmdoffset(12);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
+	
 	EVE_cmd_execute();
 }
 
@@ -1488,24 +1298,14 @@ void EVE_cmd_flashread(uint32_t dest, uint32_t src, uint32_t num)
 void EVE_cmd_flashupdate(uint32_t dest, uint32_t src, uint32_t num)
 {
 	EVE_begin_cmd(CMD_FLASHUPDATE);
-
-	spi_transmit((uint8_t)(dest));
-	spi_transmit((uint8_t)(dest >> 8));
-	spi_transmit((uint8_t)(dest >> 16));
-	spi_transmit((uint8_t)(dest >> 24));
-
-	spi_transmit((uint8_t)(src));
-	spi_transmit((uint8_t)(src >> 8));
-	spi_transmit((uint8_t)(src >> 16));
-	spi_transmit((uint8_t)(src >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
-
+	BUFFER_SPI_DWORD(dest)
+	BUFFER_SPI_DWORD(src)
+	BUFFER_SPI_DWORD(num)
+	
 	EVE_inc_cmdoffset(12);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
+	
 	EVE_cmd_execute();
 }
 
@@ -1515,8 +1315,9 @@ void EVE_cmd_flashupdate(uint32_t dest, uint32_t src, uint32_t num)
 void EVE_cmd_flasherase(void)
 {
 	EVE_begin_cmd(CMD_FLASHERASE);
-	EVE_cs_clear();
 	
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
 }
 
@@ -1526,8 +1327,9 @@ void EVE_cmd_flasherase(void)
 void EVE_cmd_flashattach(void)
 {
 	EVE_begin_cmd(CMD_FLASHATTACH);
-	EVE_cs_clear();
 	
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
 }
 
@@ -1537,8 +1339,9 @@ void EVE_cmd_flashattach(void)
 void EVE_cmd_flashdetach(void)
 {
 	EVE_begin_cmd(CMD_FLASHDETACH);
-	EVE_cs_clear();
 	
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
 }
 
@@ -1548,8 +1351,9 @@ void EVE_cmd_flashdetach(void)
 void EVE_cmd_flashspidesel(void)
 {
 	EVE_begin_cmd(CMD_FLASHSPIDESEL);
-	EVE_cs_clear();
 	
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
 }
 
@@ -1560,14 +1364,15 @@ uint32_t EVE_cmd_flashfast(void)
 	uint16_t offset;
 
 	EVE_begin_cmd(CMD_FLASHFAST);
-	spi_transmit(0);
-	spi_transmit(0);
-	spi_transmit(0);
-	spi_transmit(0);
+	BUFFER_SPI_DWORD(0)
+
 	offset = cmdOffset;
 	EVE_inc_cmdoffset(4);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
+	
 	return EVE_memRead32(EVE_RAM_CMD + offset);
 }
 
@@ -1578,15 +1383,13 @@ uint32_t EVE_cmd_flashfast(void)
 void EVE_cmd_flashspitx(uint32_t num, const uint8_t *data)
 {
 	EVE_begin_cmd(CMD_FLASHSPITX);
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
+	BUFFER_SPI_DWORD(num)
 
 	EVE_inc_cmdoffset(4);
-	EVE_cs_clear();
 
+	SEND_SPI_BUFFER()
+	
+	WAIT_SPI()
 	block_transfer(data, num);
 }
 
@@ -1597,19 +1400,13 @@ void EVE_cmd_flashspitx(uint32_t num, const uint8_t *data)
 void EVE_cmd_flashspirx(uint32_t dest, uint32_t num)
 {
 	EVE_begin_cmd(CMD_FLASHREAD);
-
-	spi_transmit((uint8_t)(dest));
-	spi_transmit((uint8_t)(dest >> 8));
-	spi_transmit((uint8_t)(dest >> 16));
-	spi_transmit((uint8_t)(dest >> 24));
-
-	spi_transmit((uint8_t)(num));
-	spi_transmit((uint8_t)(num >> 8));
-	spi_transmit((uint8_t)(num >> 16));
-	spi_transmit((uint8_t)(num >> 24));
+	BUFFER_SPI_DWORD(dest)
+	BUFFER_SPI_DWORD(num)
 
 	EVE_inc_cmdoffset(8);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
 }
 
@@ -1618,19 +1415,17 @@ void EVE_cmd_flashspirx(uint32_t dest, uint32_t num)
 void EVE_cmd_flashsource(uint32_t ptr)
 {
 	EVE_begin_cmd(CMD_FLASHSOURCE);
-
-	spi_transmit((uint8_t)(ptr));
-	spi_transmit((uint8_t)(ptr >> 8));
-	spi_transmit((uint8_t)(ptr >> 16));
-	spi_transmit((uint8_t)(ptr >> 24));
+	BUFFER_SPI_DWORD(ptr)
 
 	EVE_inc_cmdoffset(4);
-	EVE_cs_clear();
+
+	SEND_SPI_BUFFER()
+
 	EVE_cmd_execute();
 }
 
 
-/* switch the FLASH attached to a BT815/BT816 to full-speed mode, returns 0 for failing to do so */
+/* switch the FLASH attached to a BT815/BT816 to full-speed mode, returns 0 for failing to do so, does not support cmd-burst */
 uint8_t EVE_init_flash(void)
 {
 	uint8_t timeout = 0;
@@ -1696,133 +1491,54 @@ void EVE_cmd_text_var(int16_t x0, int16_t y0, int16_t font, uint16_t options, co
 	va_list arguments;
 	uint8_t counter;
 	uint32_t data;
-		
+
 	va_start(arguments, num_args);
-	
-	if(cmd_burst)
+
+	BUFFER_SPI_DWORD(CMD_TEXT)
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
+
+	EVE_inc_cmdoffset(12);
+
+	EVE_write_string(text);
+
+	if(options & EVE_OPT_FORMAT)
 	{
-		spi_transmit_async((uint8_t)(CMD_TEXT));	/* send data low byte */
-		spi_transmit_async((uint8_t)(CMD_TEXT >> 8));
-		spi_transmit_async((uint8_t)(CMD_TEXT >> 16));
-		spi_transmit_async((uint8_t)(CMD_TEXT >> 24));	/* send data high byte */
-
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(12);
-
-		EVE_write_string(text);
-
-		if(options & EVE_OPT_FORMAT)
+		for(counter = 0; counter < num_args; counter++)
 		{
-			for(counter=0;counter<num_args;counter++)
-			{
-				data = (uint32_t) va_arg(arguments, int); 
-				spi_transmit_async((uint8_t)(data)); /* send data low byte */
-				spi_transmit_async((uint8_t)(data >> 8));
-				spi_transmit_async((uint8_t)(data >> 16));
-				spi_transmit_async((uint8_t)(data >> 24)); /* send data high byte */
-				EVE_inc_cmdoffset(4);
-			}
+			data = (uint32_t) va_arg(arguments, int);
+			BUFFER_SPI_DWORD(data)
+			EVE_inc_cmdoffset(4);
 		}
 	}
-	else
+
+	if(!cmd_burst)
 	{
-		EVE_start_cmd(CMD_TEXT);
-
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(8);
-
-		EVE_write_string(text);
-
-		if(options & EVE_OPT_FORMAT)
-		{
-			for(counter=0;counter<num_args;counter++)
-			{
-				data = (uint32_t) va_arg(arguments, int);
-				spi_transmit((uint8_t)(data)); /* send data low byte */
-				spi_transmit((uint8_t)(data >> 8));
-				spi_transmit((uint8_t)(data >> 16));
-				spi_transmit((uint8_t)(data >> 24)); /* send data high byte */
-				EVE_inc_cmdoffset(4);
-			}
-		}
-
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 
 	va_end(arguments);
-
 }
 #endif
 
 
 void EVE_cmd_text(int16_t x0, int16_t y0, int16_t font, uint16_t options, const char* text)
 {
-	if(cmd_burst)
+	EVE_start_cmd(CMD_TEXT);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
+
+	EVE_inc_cmdoffset(8);
+
+	EVE_write_string(text);
+	
+	if(!cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(CMD_TEXT)); /* send data low byte */
-		spi_transmit_async((uint8_t)(CMD_TEXT >> 8));
-		spi_transmit_async((uint8_t)(CMD_TEXT >> 16));
-		spi_transmit_async((uint8_t)(CMD_TEXT >> 24)); /* send data high byte */
-
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(12);
-
-		EVE_write_string(text);
-	}
-	else
-	{
-		EVE_start_cmd(CMD_TEXT);
-
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(8);
-
-		EVE_write_string(text);
-
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 }
 
@@ -1834,86 +1550,36 @@ void EVE_cmd_button_var(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t 
 	va_list arguments;
 	uint8_t counter;
 	uint32_t data;
-	
+
 	va_start(arguments, num_args);
 
 	EVE_start_cmd(CMD_BUTTON);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
 
-	if(cmd_burst)
+	EVE_inc_cmdoffset(12);
+
+	EVE_write_string(text);
+
+	if(options & EVE_OPT_FORMAT)
 	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(h0));
-		spi_transmit_async((uint8_t)(h0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-
-		if(options & EVE_OPT_FORMAT)
+		for(counter = 0; counter < num_args; counter++)
 		{
-			for(counter=0;counter<num_args;counter++)
-			{
-				data = (uint32_t) va_arg(arguments, int);
-				spi_transmit_async((uint8_t)(data)); /* send data low byte */
-				spi_transmit_async((uint8_t)(data >> 8));
-				spi_transmit_async((uint8_t)(data >> 16));
-				spi_transmit_async((uint8_t)(data >> 24)); /* send data high byte */
-				EVE_inc_cmdoffset(4);
-			}
+			data = (uint32_t) va_arg(arguments, int);
+			BUFFER_SPI_DWORD(data)
+			EVE_inc_cmdoffset(4);
 		}
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(h0));
-		spi_transmit((uint8_t)(h0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-
-		if(options & EVE_OPT_FORMAT)
-		{
-			for(counter=0;counter<num_args;counter++)
-			{
-				data = (uint32_t) va_arg(arguments, int);
-				spi_transmit((uint8_t)(data)); /* send data low byte */
-				spi_transmit((uint8_t)(data >> 8));
-				spi_transmit((uint8_t)(data >> 16));
-				spi_transmit((uint8_t)(data >> 24)); /* send data high byte */
-				EVE_inc_cmdoffset(4);
-			}
-		}
-
-		EVE_cs_clear();
 	}
 	
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
+
 	va_end(arguments);
 }
 #endif
@@ -1922,53 +1588,20 @@ void EVE_cmd_button_var(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t 
 void EVE_cmd_button(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t font, uint16_t options, const char* text)
 {
 	EVE_start_cmd(CMD_BUTTON);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
 
-	if(cmd_burst)
+	EVE_inc_cmdoffset(12);
+
+	EVE_write_string(text);
+
+	if(!cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(h0));
-		spi_transmit_async((uint8_t)(h0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(h0));
-		spi_transmit((uint8_t)(h0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 }
 
@@ -1977,332 +1610,139 @@ void EVE_cmd_button(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t font
 void EVE_cmd_clock(int16_t x0, int16_t y0, int16_t r0, uint16_t options, uint16_t hours, uint16_t minutes, uint16_t seconds, uint16_t millisecs)
 {
 	EVE_start_cmd(CMD_CLOCK);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(r0));
-		spi_transmit_async((uint8_t)(r0 >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(hours));
-		spi_transmit_async((uint8_t)(hours >> 8));
-
-		spi_transmit_async((uint8_t)(minutes));
-		spi_transmit_async((uint8_t)(minutes >> 8));
-
-		spi_transmit_async((uint8_t)(seconds));
-		spi_transmit_async((uint8_t)(seconds >> 8));
-
-		spi_transmit_async((uint8_t)(millisecs));
-		spi_transmit_async((uint8_t)(millisecs >> 8));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(r0));
-		spi_transmit((uint8_t)(r0 >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(hours));
-		spi_transmit((uint8_t)(hours >> 8));
-
-		spi_transmit((uint8_t)(minutes));
-		spi_transmit((uint8_t)(minutes >> 8));
-
-		spi_transmit((uint8_t)(seconds));
-		spi_transmit((uint8_t)(seconds >> 8));
-
-		spi_transmit((uint8_t)(millisecs));
-		spi_transmit((uint8_t)(millisecs >> 8));
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(r0)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(hours)
+	BUFFER_SPI_WORD(minutes)
+	BUFFER_SPI_WORD(seconds)
+	BUFFER_SPI_WORD(millisecs)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_color_rgb(uint8_t red, uint8_t green, uint8_t blue)
 {
-	if(cmd_burst)
-	{
-		spi_transmit_async(green); /* low-byte */
-		spi_transmit_async(blue);
-		spi_transmit_async(red);
-		spi_transmit_async(0x04); /* encoding for COLOR_RGB */
-	}
-	else
-	{
-		spi_transmit(green);
-		spi_transmit(blue);
-		spi_transmit(red);
-		spi_transmit(0x04); /* encoding for COLOR_RGB */
-		EVE_cs_clear();
-	}
-
+	BUFFER_SPI_BYTE(green)	/* low-byte */
+	BUFFER_SPI_BYTE(blue)
+	BUFFER_SPI_BYTE(red)
+	BUFFER_SPI_BYTE(0x04)	/* encoding for COLOR_RGB */
+	
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_bgcolor(uint32_t color)
 {
 	EVE_start_cmd(CMD_BGCOLOR);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(color));
-		spi_transmit_async((uint8_t)(color >> 8));
-		spi_transmit_async((uint8_t)(color >> 16));
-		spi_transmit_async(0x00);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(color));
-		spi_transmit((uint8_t)(color >> 8));
-		spi_transmit((uint8_t)(color >> 16));
-		spi_transmit(0x00);
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(color & 0x00ffffff)
 
 	EVE_inc_cmdoffset(4);
+	
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_fgcolor(uint32_t color)
 {
 	EVE_start_cmd(CMD_FGCOLOR);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(color));
-		spi_transmit_async((uint8_t)(color >> 8));
-		spi_transmit_async((uint8_t)(color >> 16));
-		spi_transmit_async(0x00);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(color));
-		spi_transmit((uint8_t)(color >> 8));
-		spi_transmit((uint8_t)(color >> 16));
-		spi_transmit(0x00);
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(color & 0x00ffffff)
 
 	EVE_inc_cmdoffset(4);
+	
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_gradcolor(uint32_t color)
 {
 	EVE_start_cmd(CMD_GRADCOLOR);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(color));
-		spi_transmit_async((uint8_t)(color >> 8));
-		spi_transmit_async((uint8_t)(color >> 16));
-		spi_transmit_async(0x00);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(color));
-		spi_transmit((uint8_t)(color >> 8));
-		spi_transmit((uint8_t)(color >> 16));
-		spi_transmit(0x00);
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(color & 0x00ffffff)
 
 	EVE_inc_cmdoffset(4);
+	
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_gauge(int16_t x0, int16_t y0, int16_t r0, uint16_t options, uint16_t major, uint16_t minor, uint16_t val, uint16_t range)
 {
 	EVE_start_cmd(CMD_GAUGE);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(r0));
-		spi_transmit_async((uint8_t)(r0 >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(major));
-		spi_transmit_async((uint8_t)(major >> 8));
-
-		spi_transmit_async((uint8_t)(minor));
-		spi_transmit_async((uint8_t)(minor >> 8));
-
-		spi_transmit_async((uint8_t)(val));
-		spi_transmit_async((uint8_t)(val >> 8));
-
-		spi_transmit_async((uint8_t)(range));
-		spi_transmit_async((uint8_t)(range >> 8));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(r0));
-		spi_transmit((uint8_t)(r0 >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(major));
-		spi_transmit((uint8_t)(major >> 8));
-
-		spi_transmit((uint8_t)(minor));
-		spi_transmit((uint8_t)(minor >> 8));
-
-		spi_transmit((uint8_t)(val));
-		spi_transmit((uint8_t)(val >> 8));
-
-		spi_transmit((uint8_t)(range));
-		spi_transmit((uint8_t)(range >> 8));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(r0)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(major)
+	BUFFER_SPI_WORD(minor)
+	BUFFER_SPI_WORD(val)
+	BUFFER_SPI_WORD(range)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_gradient(int16_t x0, int16_t y0, uint32_t rgb0, int16_t x1, int16_t y1, uint32_t rgb1)
 {
 	EVE_start_cmd(CMD_GRADIENT);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(rgb0));
-		spi_transmit_async((uint8_t)(rgb0 >> 8));
-		spi_transmit_async((uint8_t)(rgb0 >> 16));
-		spi_transmit_async(0x00);
-
-		spi_transmit_async((uint8_t)(x1));
-		spi_transmit_async((uint8_t)(x1 >> 8));
-
-		spi_transmit_async((uint8_t)(y1));
-		spi_transmit_async((uint8_t)(y1 >> 8));
-
-		spi_transmit_async((uint8_t)(rgb1));
-		spi_transmit_async((uint8_t)(rgb1 >> 8));
-		spi_transmit_async((uint8_t)(rgb1 >> 16));
-		spi_transmit_async(0x00);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(rgb0));
-		spi_transmit((uint8_t)(rgb0 >> 8));
-		spi_transmit((uint8_t)(rgb0 >> 16));
-		spi_transmit(0x00);
-
-		spi_transmit((uint8_t)(x1));
-		spi_transmit((uint8_t)(x1 >> 8));
-
-		spi_transmit((uint8_t)(y1));
-		spi_transmit((uint8_t)(y1 >> 8));
-
-		spi_transmit((uint8_t)(rgb1));
-		spi_transmit((uint8_t)(rgb1 >> 8));
-		spi_transmit((uint8_t)(rgb1 >> 16));
-		spi_transmit(0x00);
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_DWORD(rgb0 & 0x00ffffff)
+	BUFFER_SPI_WORD(x1)
+	BUFFER_SPI_WORD(y1)
+	BUFFER_SPI_DWORD(rgb1 & 0x00ffffff)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_keys(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t font, uint16_t options, const char* text)
 {
 	EVE_start_cmd(CMD_KEYS);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(h0));
-		spi_transmit_async((uint8_t)(h0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(h0));
-		spi_transmit((uint8_t)(h0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
 
 	EVE_inc_cmdoffset(12);
+
 	EVE_write_string(text);
 
-	if(cmd_burst == 0)
+	if(!cmd_burst)
 	{
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 }
 
@@ -2310,240 +1750,82 @@ void EVE_cmd_keys(int16_t x0, int16_t y0, int16_t w0, int16_t h0, int16_t font, 
 void EVE_cmd_progress(int16_t x0, int16_t y0, int16_t w0, int16_t h0, uint16_t options, uint16_t val, uint16_t range)
 {
 	EVE_start_cmd(CMD_PROGRESS);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(val)
+	BUFFER_SPI_WORD(range)
+	BUFFER_SPI_WORD(0)		/* dummy word for 4-byte alignment */
+	
+	EVE_inc_cmdoffset(16);
 
-	if(cmd_burst)
+	if(!cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(h0));
-		spi_transmit_async((uint8_t)(h0 >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(val));
-		spi_transmit_async((uint8_t)(val >> 8));
-
-		spi_transmit_async((uint8_t)(range));
-		spi_transmit_async((uint8_t)(range >> 8));
-
-		spi_transmit_async(0x00); /* dummy byte for 4-byte alignment */
-		spi_transmit_async(0x00); /* dummy byte for 4-byte alignment */
+		SEND_SPI_BUFFER()
 	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(h0));
-		spi_transmit((uint8_t)(h0 >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(val));
-		spi_transmit((uint8_t)(val >> 8));
-
-		spi_transmit((uint8_t)(range));
-		spi_transmit((uint8_t)(range >> 8));
-
-		spi_transmit(0x00);	/* dummy byte for 4-byte alignment */
-		spi_transmit(0x00); /* dummy byte for 4-byte alignment */
-
-		EVE_cs_clear();
-	}
-
-	EVE_inc_cmdoffset(16); /* update the command-ram pointer */
 }
 
 
 void EVE_cmd_scrollbar(int16_t x0, int16_t y0, int16_t w0, int16_t h0, uint16_t options, uint16_t val, uint16_t size, uint16_t range)
 {
 	EVE_start_cmd(CMD_SCROLLBAR);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(h0));
-		spi_transmit_async((uint8_t)(h0 >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(val));
-		spi_transmit_async((uint8_t)(val >> 8));
-
-		spi_transmit_async((uint8_t)(size));
-		spi_transmit_async((uint8_t)(size >> 8));
-
-		spi_transmit_async((uint8_t)(range));
-		spi_transmit_async((uint8_t)(range >> 8));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(h0));
-		spi_transmit((uint8_t)(h0 >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(val));
-		spi_transmit((uint8_t)(val >> 8));
-
-		spi_transmit((uint8_t)(size));
-		spi_transmit((uint8_t)(size >> 8));
-
-		spi_transmit((uint8_t)(range));
-		spi_transmit((uint8_t)(range >> 8));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(val)
+	BUFFER_SPI_WORD(size)
+	BUFFER_SPI_WORD(range)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_slider(int16_t x1, int16_t y1, int16_t w1, int16_t h1, uint16_t options, uint16_t val, uint16_t range)
 {
 	EVE_start_cmd(CMD_SLIDER);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x1));
-		spi_transmit_async((uint8_t)(x1 >> 8));
-
-		spi_transmit_async((uint8_t)(y1));
-		spi_transmit_async((uint8_t)(y1 >> 8));
-
-		spi_transmit_async((uint8_t)(w1));
-		spi_transmit_async((uint8_t)(w1 >> 8));
-
-		spi_transmit_async((uint8_t)(h1));
-		spi_transmit_async((uint8_t)(h1 >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(val));
-		spi_transmit_async((uint8_t)(val >> 8));
-
-		spi_transmit_async((uint8_t)(range));
-		spi_transmit_async((uint8_t)(range >> 8));
-
-		spi_transmit_async(0x00); /* dummy byte for 4-byte alignment */
-		spi_transmit_async(0x00); /* dummy byte for 4-byte alignment */
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x1));
-		spi_transmit((uint8_t)(x1 >> 8));
-
-		spi_transmit((uint8_t)(y1));
-		spi_transmit((uint8_t)(y1 >> 8));
-
-		spi_transmit((uint8_t)(w1));
-		spi_transmit((uint8_t)(w1 >> 8));
-
-		spi_transmit((uint8_t)(h1));
-		spi_transmit((uint8_t)(h1 >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(val));
-		spi_transmit((uint8_t)(val >> 8));
-
-		spi_transmit((uint8_t)(range));
-		spi_transmit((uint8_t)(range >> 8));
-
-		spi_transmit(0x00); /* dummy byte for 4-byte alignment */
-		spi_transmit(0x00); /* dummy byte for 4-byte alignment */
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x1)
+	BUFFER_SPI_WORD(y1)
+	BUFFER_SPI_WORD(w1)
+	BUFFER_SPI_WORD(h1)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(val)
+	BUFFER_SPI_WORD(range)
+	BUFFER_SPI_WORD(0)		/* dummy word for 4-byte alignment */
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_dial(int16_t x0, int16_t y0, int16_t r0, uint16_t options, uint16_t val)
 {
 	EVE_start_cmd(CMD_DIAL);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(r0));
-		spi_transmit_async((uint8_t)(r0 >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(val));
-		spi_transmit_async((uint8_t)(val >> 8));
-
-		spi_transmit_async(0);
-		spi_transmit_async(0);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(r0));
-		spi_transmit((uint8_t)(r0 >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(val));
-		spi_transmit((uint8_t)(val >> 8));
-
-		spi_transmit(0);
-		spi_transmit(0);
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(r0)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(val)
+	BUFFER_SPI_WORD(0)		/* dummy word for 4-byte alignment */
 
 	EVE_inc_cmdoffset(12);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -2554,86 +1836,36 @@ void EVE_cmd_toggle_var(int16_t x0, int16_t y0, int16_t w0, int16_t font, uint16
 	va_list arguments;
 	uint8_t counter;
 	uint32_t data;
-	
+
 	va_start(arguments, num_args);
 
 	EVE_start_cmd(CMD_TOGGLE);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(state)
 
-	if(cmd_burst)
+	EVE_inc_cmdoffset(12);
+
+	EVE_write_string(text);
+
+	if(options & EVE_OPT_FORMAT)
 	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(state));
-		spi_transmit_async((uint8_t)(state >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-
-		if(options & EVE_OPT_FORMAT)
+		for(counter = 0; counter < num_args; counter++)
 		{
-			for(counter=0;counter<num_args;counter++)
-			{
-				data = (uint32_t) va_arg(arguments, int);
-				spi_transmit_async((uint8_t)(data));
-				spi_transmit_async((uint8_t)(data >> 8));
-				spi_transmit_async((uint8_t)(data >> 16));
-				spi_transmit_async((uint8_t)(data >> 24));
-				EVE_inc_cmdoffset(4);
-			}
+			data = (uint32_t) va_arg(arguments, int);
+			BUFFER_SPI_DWORD(data)
+			EVE_inc_cmdoffset(4);
 		}
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(state));
-		spi_transmit((uint8_t)(state >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-
-		if(options & EVE_OPT_FORMAT)
-		{
-			for(counter=0;counter<num_args;counter++)
-			{
-				data = (uint32_t) va_arg(arguments, int);
-				spi_transmit((uint8_t)(data));
-				spi_transmit((uint8_t)(data >> 8));
-				spi_transmit((uint8_t)(data >> 16));
-				spi_transmit((uint8_t)(data >> 24));
-				EVE_inc_cmdoffset(4);
-			}
-		}
-
-		EVE_cs_clear();
 	}
 	
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
+
 	va_end(arguments);
 }
 #endif
@@ -2642,53 +1874,19 @@ void EVE_cmd_toggle_var(int16_t x0, int16_t y0, int16_t w0, int16_t font, uint16
 void EVE_cmd_toggle(int16_t x0, int16_t y0, int16_t w0, int16_t font, uint16_t options, uint16_t state, const char* text)
 {
 	EVE_start_cmd(CMD_TOGGLE);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_WORD(state)
 
-	if(cmd_burst)
+	EVE_inc_cmdoffset(12);
+	
+	EVE_write_string(text);
+
+	if(!cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(state));
-		spi_transmit_async((uint8_t)(state >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(state));
-		spi_transmit((uint8_t)(state >> 8));
-
-		EVE_inc_cmdoffset(12);
-		EVE_write_string(text);
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 }
 
@@ -2697,25 +1895,14 @@ void EVE_cmd_toggle(int16_t x0, int16_t y0, int16_t w0, int16_t font, uint16_t o
 void EVE_cmd_setbase(uint32_t base)
 {
 	EVE_start_cmd(CMD_SETBASE);
+	BUFFER_SPI_DWORD(base);
 
-	if(cmd_burst)
+	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(base));
-		spi_transmit_async((uint8_t)(base >> 8));
-		spi_transmit_async((uint8_t)(base >> 16));
-		spi_transmit_async((uint8_t)(base >> 24));
+		SEND_SPI_BUFFER()
 	}
-	else
-	{
-		spi_transmit((uint8_t)(base));
-		spi_transmit((uint8_t)(base >> 8));
-		spi_transmit((uint8_t)(base >> 16));
-		spi_transmit((uint8_t)(base >> 24));
-
-		EVE_cs_clear();
-	}
-
-	EVE_inc_cmdoffset(4); /* update the command-ram pointer */
 }
 #endif
 
@@ -2724,105 +1911,37 @@ void EVE_cmd_setbase(uint32_t base)
 void EVE_cmd_setbitmap(uint32_t addr, uint16_t fmt, uint16_t width, uint16_t height)
 {
 	EVE_start_cmd(CMD_SETBITMAP);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(addr));
-		spi_transmit_async((uint8_t)(addr >> 8));
-		spi_transmit_async((uint8_t)(addr >> 16));
-		spi_transmit_async((uint8_t)(addr >> 24));
-
-		spi_transmit_async((uint8_t)(fmt));
-		spi_transmit_async((uint8_t)(fmt>> 8));
-
-		spi_transmit_async((uint8_t)(width));
-		spi_transmit_async((uint8_t)(width >> 8));
-
-		spi_transmit_async((uint8_t)(height));
-		spi_transmit_async((uint8_t)(height >> 8));
-
-		spi_transmit_async(0);
-		spi_transmit_async(0);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(addr));
-		spi_transmit((uint8_t)(addr >> 8));
-		spi_transmit((uint8_t)(addr >> 16));
-		spi_transmit((uint8_t)(addr >> 24));
-
-		spi_transmit((uint8_t)(fmt));
-		spi_transmit((uint8_t)(fmt>> 8));
-
-		spi_transmit((uint8_t)(width));
-		spi_transmit((uint8_t)(width >> 8));
-
-		spi_transmit((uint8_t)(height));
-		spi_transmit((uint8_t)(height >> 8));
-
-		spi_transmit(0);
-		spi_transmit(0);
-
-		EVE_cs_clear();
-	}
-
+	BUFFER_SPI_DWORD(addr)
+	BUFFER_SPI_WORD(fmt)
+	BUFFER_SPI_WORD(width)
+	BUFFER_SPI_WORD(height)
+	BUFFER_SPI_WORD(0)
+	
 	EVE_inc_cmdoffset(12);
+	
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
+
 }
 #endif
 
 
 void EVE_cmd_number(int16_t x0, int16_t y0, int16_t font, uint16_t options, int32_t number)
 {
-	if(cmd_burst)
+	EVE_start_cmd(CMD_NUMBER);
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(font)
+	BUFFER_SPI_WORD(options)
+	BUFFER_SPI_DWORD(number)
+
+	EVE_inc_cmdoffset(12);
+
+	if(!cmd_burst)
 	{
-		spi_transmit_async((uint8_t)(CMD_NUMBER));
-		spi_transmit_async((uint8_t)(CMD_NUMBER >> 8));
-		spi_transmit_async((uint8_t)(CMD_NUMBER >> 16));
-		spi_transmit_async((uint8_t)(CMD_NUMBER >> 24));
-
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-
-		spi_transmit_async((uint8_t)(options));
-		spi_transmit_async((uint8_t)(options >> 8));
-
-		spi_transmit_async((uint8_t)(number));
-		spi_transmit_async((uint8_t)(number >> 8));
-		spi_transmit_async((uint8_t)(number >> 16));
-		spi_transmit_async((uint8_t)(number >> 24));
-
-		EVE_inc_cmdoffset(16);
-	}
-	else
-	{
-		EVE_start_cmd(CMD_NUMBER);
-
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-
-		spi_transmit((uint8_t)(options));
-		spi_transmit((uint8_t)(options >> 8));
-
-		spi_transmit((uint8_t)(number));
-		spi_transmit((uint8_t)(number >> 8));
-		spi_transmit((uint8_t)(number >> 16));
-		spi_transmit((uint8_t)(number >> 24));
-
-		EVE_inc_cmdoffset(12);
-
-		EVE_cs_clear();
+		SEND_SPI_BUFFER()
 	}
 }
 
@@ -2830,35 +1949,15 @@ void EVE_cmd_number(int16_t x0, int16_t y0, int16_t font, uint16_t options, int3
 void EVE_cmd_append(uint32_t ptr, uint32_t num)
 {
 	EVE_start_cmd(CMD_APPEND);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ptr));
-		spi_transmit_async((uint8_t)(ptr >> 8));
-		spi_transmit_async((uint8_t)(ptr >> 16));
-		spi_transmit_async((uint8_t)(ptr >> 24));
-
-		spi_transmit_async((uint8_t)(num));
-		spi_transmit_async((uint8_t)(num >> 8));
-		spi_transmit_async((uint8_t)(num >> 16));
-		spi_transmit_async((uint8_t)(num >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ptr));
-		spi_transmit((uint8_t)(ptr >> 8));
-		spi_transmit((uint8_t)(ptr >> 16));
-		spi_transmit((uint8_t)(ptr >> 24));
-
-		spi_transmit((uint8_t)(num));
-		spi_transmit((uint8_t)(num >> 8));
-		spi_transmit((uint8_t)(num >> 16));
-		spi_transmit((uint8_t)(num >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(num)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -2874,170 +1973,63 @@ void EVE_cmd_append(uint32_t ptr, uint32_t num)
 void EVE_cmd_getmatrix(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f)
 {
 	EVE_start_cmd(CMD_GETMATRIX);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(a));
-		spi_transmit_async((uint8_t)(a >> 8));
-		spi_transmit_async((uint8_t)(a >> 16));
-		spi_transmit_async((uint8_t)(a >> 24));
-
-		spi_transmit_async((uint8_t)(b));
-		spi_transmit_async((uint8_t)(b >> 8));
-		spi_transmit_async((uint8_t)(b >> 16));
-		spi_transmit_async((uint8_t)(b >> 24));
-
-		spi_transmit_async((uint8_t)(c));
-		spi_transmit_async((uint8_t)(c >> 8));
-		spi_transmit_async((uint8_t)(c >> 16));
-		spi_transmit_async((uint8_t)(c >> 24));
-
-		spi_transmit_async((uint8_t)(d));
-		spi_transmit_async((uint8_t)(d >> 8));
-		spi_transmit_async((uint8_t)(d >> 16));
-		spi_transmit_async((uint8_t)(d >> 24));
-
-		spi_transmit_async((uint8_t)(e));
-		spi_transmit_async((uint8_t)(e >> 8));
-		spi_transmit_async((uint8_t)(e >> 16));
-		spi_transmit_async((uint8_t)(e >> 24));
-
-		spi_transmit_async((uint8_t)(f));
-		spi_transmit_async((uint8_t)(f >> 8));
-		spi_transmit_async((uint8_t)(f >> 16));
-		spi_transmit_async((uint8_t)(f >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(a));
-		spi_transmit((uint8_t)(a >> 8));
-		spi_transmit((uint8_t)(a >> 16));
-		spi_transmit((uint8_t)(a >> 24));
-
-		spi_transmit((uint8_t)(b));
-		spi_transmit((uint8_t)(b >> 8));
-		spi_transmit((uint8_t)(b >> 16));
-		spi_transmit((uint8_t)(b >> 24));
-
-		spi_transmit((uint8_t)(c));
-		spi_transmit((uint8_t)(c >> 8));
-		spi_transmit((uint8_t)(c >> 16));
-		spi_transmit((uint8_t)(c >> 24));
-
-		spi_transmit((uint8_t)(d));
-		spi_transmit((uint8_t)(d >> 8));
-		spi_transmit((uint8_t)(d >> 16));
-		spi_transmit((uint8_t)(d >> 24));
-
-		spi_transmit((uint8_t)(e));
-		spi_transmit((uint8_t)(e >> 8));
-		spi_transmit((uint8_t)(e >> 16));
-		spi_transmit((uint8_t)(e >> 24));
-
-		spi_transmit((uint8_t)(f));
-		spi_transmit((uint8_t)(f >> 8));
-		spi_transmit((uint8_t)(f >> 16));
-		spi_transmit((uint8_t)(f >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(a)
+	BUFFER_SPI_DWORD(b)
+	BUFFER_SPI_DWORD(c)
+	BUFFER_SPI_DWORD(d)
+	BUFFER_SPI_DWORD(e)
+	BUFFER_SPI_DWORD(f)
 
 	EVE_inc_cmdoffset(24);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_translate(int32_t tx, int32_t ty)
 {
 	EVE_start_cmd(CMD_TRANSLATE);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(tx));
-		spi_transmit_async((uint8_t)(tx >> 8));
-		spi_transmit_async((uint8_t)(tx >> 16));
-		spi_transmit_async((uint8_t)(tx >> 24));
-
-		spi_transmit_async((uint8_t)(ty));
-		spi_transmit_async((uint8_t)(ty >> 8));
-		spi_transmit_async((uint8_t)(ty >> 16));
-		spi_transmit_async((uint8_t)(ty >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(tx));
-		spi_transmit((uint8_t)(tx >> 8));
-		spi_transmit((uint8_t)(tx >> 16));
-		spi_transmit((uint8_t)(tx >> 24));
-
-		spi_transmit((uint8_t)(ty));
-		spi_transmit((uint8_t)(ty >> 8));
-		spi_transmit((uint8_t)(ty >> 16));
-		spi_transmit((uint8_t)(ty >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(tx)
+	BUFFER_SPI_DWORD(ty)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_scale(int32_t sx, int32_t sy)
 {
 	EVE_start_cmd(CMD_SCALE);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(sx));
-		spi_transmit_async((uint8_t)(sx >> 8));
-		spi_transmit_async((uint8_t)(sx >> 16));
-		spi_transmit_async((uint8_t)(sx >> 24));
-
-		spi_transmit_async((uint8_t)(sy));
-		spi_transmit_async((uint8_t)(sy >> 8));
-		spi_transmit_async((uint8_t)(sy >> 16));
-		spi_transmit_async((uint8_t)(sy >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(sx));
-		spi_transmit((uint8_t)(sx >> 8));
-		spi_transmit((uint8_t)(sx >> 16));
-		spi_transmit((uint8_t)(sx >> 24));
-
-		spi_transmit((uint8_t)(sy));
-		spi_transmit((uint8_t)(sy >> 8));
-		spi_transmit((uint8_t)(sy >> 16));
-		spi_transmit((uint8_t)(sy >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(sx)
+	BUFFER_SPI_DWORD(sy)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_rotate(int32_t ang)
 {
 	EVE_start_cmd(CMD_ROTATE);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ang));
-		spi_transmit_async((uint8_t)(ang >> 8));
-		spi_transmit_async((uint8_t)(ang >> 16));
-		spi_transmit_async((uint8_t)(ang >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ang));
-		spi_transmit((uint8_t)(ang >> 8));
-		spi_transmit((uint8_t)(ang >> 16));
-		spi_transmit((uint8_t)(ang >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ang)
 
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -3045,55 +2037,17 @@ void EVE_cmd_rotate(int32_t ang)
 void EVE_cmd_rotatearound(int32_t x0, int32_t y0, int32_t angle, int32_t scale)
 {
 	EVE_start_cmd(CMD_ROTATEAROUND);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-		spi_transmit_async((uint8_t)(x0 >> 16));
-		spi_transmit_async((uint8_t)(x0 >> 24));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-		spi_transmit_async((uint8_t)(y0 >> 16));
-		spi_transmit_async((uint8_t)(y0 >> 24));
-
-		spi_transmit_async((uint8_t)(angle));
-		spi_transmit_async((uint8_t)(angle >> 8));
-		spi_transmit_async((uint8_t)(angle >> 16));
-		spi_transmit_async((uint8_t)(angle >> 24));
-
-		spi_transmit_async((uint8_t)(scale));
-		spi_transmit_async((uint8_t)(scale >> 8));
-		spi_transmit_async((uint8_t)(scale >> 16));
-		spi_transmit_async((uint8_t)(scale >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-		spi_transmit((uint8_t)(x0 >> 16));
-		spi_transmit((uint8_t)(x0 >> 24));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-		spi_transmit((uint8_t)(y0 >> 16));
-		spi_transmit((uint8_t)(y0 >> 24));
-
-		spi_transmit((uint8_t)(angle));
-		spi_transmit((uint8_t)(angle >> 8));
-		spi_transmit((uint8_t)(angle >> 16));
-		spi_transmit((uint8_t)(angle >> 24));
-
-		spi_transmit((uint8_t)(scale));
-		spi_transmit((uint8_t)(scale >> 8));
-		spi_transmit((uint8_t)(scale >> 16));
-		spi_transmit((uint8_t)(scale >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(x0)
+	BUFFER_SPI_DWORD(y0)
+	BUFFER_SPI_DWORD(ang)
+	BUFFER_SPI_DWORD(scale)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 #endif
 
@@ -3103,25 +2057,14 @@ void EVE_cmd_rotatearound(int32_t x0, int32_t y0, int32_t angle, int32_t scale)
 void EVE_cmd_calibrate(void)
 {
 	EVE_start_cmd(CMD_CALIBRATE);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async(0);
-		spi_transmit_async(0);
-		spi_transmit_async(0);
-		spi_transmit_async(0);
-	}
-	else
-	{
-		spi_transmit(0);
-		spi_transmit(0);
-		spi_transmit(0);
-		spi_transmit(0);
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(0)
 
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -3129,35 +2072,15 @@ void EVE_cmd_calibrate(void)
 void EVE_cmd_romfont(uint32_t font, uint32_t romslot)
 {
 	EVE_start_cmd(CMD_ROMFONT);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(font));
-		spi_transmit_async((uint8_t)(font >> 8));
-		spi_transmit_async(0x00);
-		spi_transmit_async(0x00);
-
-		spi_transmit_async((uint8_t)(romslot));
-		spi_transmit_async((uint8_t)(romslot >> 8));
-		spi_transmit_async(0x00);
-		spi_transmit_async(0x00);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(font));
-		spi_transmit((uint8_t)(font >> 8));
-		spi_transmit(0x00);
-		spi_transmit(0x00);
-
-		spi_transmit((uint8_t)(romslot));
-		spi_transmit((uint8_t)(romslot >> 8));
-		spi_transmit(0x00);
-		spi_transmit(0x00);
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(font & 0x0000ffff)
+	BUFFER_SPI_DWORD(romslot & 0x0000ffff)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 #endif
 
@@ -3166,25 +2089,14 @@ void EVE_cmd_romfont(uint32_t font, uint32_t romslot)
 void EVE_cmd_setscratch(uint32_t handle)
 {
 	EVE_start_cmd(CMD_SETSCRATCH);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(handle));
-		spi_transmit_async((uint8_t)(handle >> 8));
-		spi_transmit_async((uint8_t)(handle >> 16));
-		spi_transmit_async((uint8_t)(handle >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(handle));
-		spi_transmit((uint8_t)(handle >> 8));
-		spi_transmit((uint8_t)(handle >> 16));
-		spi_transmit((uint8_t)(handle >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(handle)
 
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 #endif
 
@@ -3192,100 +2104,37 @@ void EVE_cmd_setscratch(uint32_t handle)
 void EVE_cmd_sketch(int16_t x0, int16_t y0, uint16_t w0, uint16_t h0, uint32_t ptr, uint16_t format)
 {
 	EVE_start_cmd(CMD_SKETCH);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(w0));
-		spi_transmit_async((uint8_t)(w0 >> 8));
-
-		spi_transmit_async((uint8_t)(h0));
-		spi_transmit_async((uint8_t)(h0 >> 8));
-
-		spi_transmit_async((uint8_t)(ptr));
-		spi_transmit_async((uint8_t)(ptr >> 8));
-		spi_transmit_async((uint8_t)(ptr >> 16));
-		spi_transmit_async((uint8_t)(ptr >> 24));
-
-		spi_transmit_async((uint8_t)(format));
-		spi_transmit_async((uint8_t)(format >> 8));
-
-		spi_transmit_async(0);
-		spi_transmit_async(0);
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(w0));
-		spi_transmit((uint8_t)(w0 >> 8));
-
-		spi_transmit((uint8_t)(h0));
-		spi_transmit((uint8_t)(h0 >> 8));
-
-		spi_transmit((uint8_t)(ptr));
-		spi_transmit((uint8_t)(ptr >> 8));
-		spi_transmit((uint8_t)(ptr >> 16));
-		spi_transmit((uint8_t)(ptr >> 24));
-
-		spi_transmit((uint8_t)(format));
-		spi_transmit((uint8_t)(format >> 8));
-
-		spi_transmit(0);
-		spi_transmit(0);
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(w0)
+	BUFFER_SPI_WORD(h0)
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_WORD(format)
+	BUFFER_SPI_WORD(0)		/* dummy word for 4-byte alignment */
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_spinner(int16_t x0, int16_t y0, uint16_t style, uint16_t scale)
 {
 	EVE_start_cmd(CMD_SPINNER);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(style));
-		spi_transmit_async((uint8_t)(style >> 8));
-
-		spi_transmit_async((uint8_t)(scale));
-		spi_transmit_async((uint8_t)(scale >> 8));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(style));
-		spi_transmit((uint8_t)(style >> 8));
-
-		spi_transmit((uint8_t)(scale));
-		spi_transmit((uint8_t)(scale >> 8));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_WORD(style)
+	BUFFER_SPI_WORD(scale)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -3295,298 +2144,125 @@ void EVE_cmd_spinner(int16_t x0, int16_t y0, uint16_t style, uint16_t scale)
 void EVE_cmd_animstart(int32_t ch, uint32_t aoptr, uint32_t loop)
 {
 	EVE_start_cmd(CMD_ANIMSTART);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ch));
-		spi_transmit_async((uint8_t)(ch >> 8));
-		spi_transmit_async((uint8_t)(ch >> 16));
-		spi_transmit_async((uint8_t)(ch >> 24));
-
-		spi_transmit_async((uint8_t)(aoptr));
-		spi_transmit_async((uint8_t)(aoptr >> 8));
-		spi_transmit_async((uint8_t)(aoptr >> 16));
-		spi_transmit_async((uint8_t)(aoptr >> 24));
-
-		spi_transmit_async((uint8_t)(loop));
-		spi_transmit_async((uint8_t)(loop >> 8));
-		spi_transmit_async((uint8_t)(loop >> 16));
-		spi_transmit_async((uint8_t)(loop >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ch));
-		spi_transmit((uint8_t)(ch >> 8));
-		spi_transmit((uint8_t)(ch >> 16));
-		spi_transmit((uint8_t)(ch >> 24));
-
-		spi_transmit((uint8_t)(aoptr));
-		spi_transmit((uint8_t)(aoptr >> 8));
-		spi_transmit((uint8_t)(aoptr >> 16));
-		spi_transmit((uint8_t)(aoptr >> 24));
-
-		spi_transmit((uint8_t)(loop));
-		spi_transmit((uint8_t)(loop >> 8));
-		spi_transmit((uint8_t)(loop >> 16));
-		spi_transmit((uint8_t)(loop >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ch)
+	BUFFER_SPI_DWORD(aoptr)
+	BUFFER_SPI_DWORD(loop)
 
 	EVE_inc_cmdoffset(12);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_animstop(int32_t ch)
 {
 	EVE_start_cmd(CMD_ANIMSTOP);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ch));
-		spi_transmit_async((uint8_t)(ch >> 8));
-		spi_transmit_async((uint8_t)(ch >> 16));
-		spi_transmit_async((uint8_t)(ch >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ch));
-		spi_transmit((uint8_t)(ch >> 8));
-		spi_transmit((uint8_t)(ch >> 16));
-		spi_transmit((uint8_t)(ch >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ch)
 
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_animxy(int32_t ch, int16_t x0, int16_t y0)
 {
 	EVE_start_cmd(CMD_ANIMXY);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ch));
-		spi_transmit_async((uint8_t)(ch >> 8));
-		spi_transmit_async((uint8_t)(ch >> 16));
-		spi_transmit_async((uint8_t)(ch >> 24));
-
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ch));
-		spi_transmit((uint8_t)(ch >> 8));
-		spi_transmit((uint8_t)(ch >> 16));
-		spi_transmit((uint8_t)(ch >> 24));
-
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ch)
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_animdraw(int32_t ch)
 {
 	EVE_start_cmd(CMD_ANIMDRAW);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ch));
-		spi_transmit_async((uint8_t)(ch >> 8));
-		spi_transmit_async((uint8_t)(ch >> 16));
-		spi_transmit_async((uint8_t)(ch >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ch));
-		spi_transmit((uint8_t)(ch >> 8));
-		spi_transmit((uint8_t)(ch >> 16));
-		spi_transmit((uint8_t)(ch >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ch)
 
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_animframe(int16_t x0, int16_t y0, uint32_t aoptr, uint32_t frame)
 {
 	EVE_start_cmd(CMD_ANIMFRAME);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(aoptr));
-		spi_transmit_async((uint8_t)(aoptr >> 8));
-		spi_transmit_async((uint8_t)(aoptr >> 16));
-		spi_transmit_async((uint8_t)(aoptr >> 24));
-
-		spi_transmit_async((uint8_t)(frame));
-		spi_transmit_async((uint8_t)(frame >> 8));
-		spi_transmit_async((uint8_t)(frame >> 16));
-		spi_transmit_async((uint8_t)(frame >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(aoptr));
-		spi_transmit((uint8_t)(aoptr >> 8));
-		spi_transmit((uint8_t)(aoptr >> 16));
-		spi_transmit((uint8_t)(aoptr >> 24));
-
-		spi_transmit((uint8_t)(frame));
-		spi_transmit((uint8_t)(frame >> 8));
-		spi_transmit((uint8_t)(frame >> 16));
-		spi_transmit((uint8_t)(frame >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_DWORD(aoptr)
+	BUFFER_SPI_DWORD(frame)
 
 	EVE_inc_cmdoffset(12);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_gradienta(int16_t x0, int16_t y0, uint32_t argb0, int16_t x1, int16_t y1, uint32_t argb1)
 {
 	EVE_start_cmd(CMD_GRADIENTA);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(x0));
-		spi_transmit_async((uint8_t)(x0 >> 8));
-
-		spi_transmit_async((uint8_t)(y0));
-		spi_transmit_async((uint8_t)(y0 >> 8));
-
-		spi_transmit_async((uint8_t)(argb0));
-		spi_transmit_async((uint8_t)(argb0 >> 8));
-		spi_transmit_async((uint8_t)(argb0 >> 16));
-		spi_transmit_async((uint8_t)(argb0 >> 24));
-
-		spi_transmit_async((uint8_t)(x1));
-		spi_transmit_async((uint8_t)(x1 >> 8));
-
-		spi_transmit_async((uint8_t)(y1));
-		spi_transmit_async((uint8_t)(y1 >> 8));
-
-		spi_transmit_async((uint8_t)(argb1));
-		spi_transmit_async((uint8_t)(argb1 >> 8));
-		spi_transmit_async((uint8_t)(argb1 >> 16));
-		spi_transmit_async((uint8_t)(argb1 >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(x0));
-		spi_transmit((uint8_t)(x0 >> 8));
-
-		spi_transmit((uint8_t)(y0));
-		spi_transmit((uint8_t)(y0 >> 8));
-
-		spi_transmit((uint8_t)(argb0));
-		spi_transmit((uint8_t)(argb0 >> 8));
-		spi_transmit((uint8_t)(argb0 >> 16));
-		spi_transmit((uint8_t)(argb0 >> 24));
-
-		spi_transmit((uint8_t)(x1));
-		spi_transmit((uint8_t)(x1 >> 8));
-
-		spi_transmit((uint8_t)(y1));
-		spi_transmit((uint8_t)(y1 >> 8));
-
-		spi_transmit((uint8_t)(argb1));
-		spi_transmit((uint8_t)(argb1 >> 8));
-		spi_transmit((uint8_t)(argb1 >> 16));
-		spi_transmit((uint8_t)(argb1 >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_WORD(x0)
+	BUFFER_SPI_WORD(y0)
+	BUFFER_SPI_DWORD(argb0)
+	BUFFER_SPI_WORD(x1)
+	BUFFER_SPI_WORD(y1)
+	BUFFER_SPI_DWORD(argb1)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_fillwidth(uint32_t s)
 {
 	EVE_start_cmd(CMD_FILLWIDTH);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(s));
-		spi_transmit_async((uint8_t)(s >> 8));
-		spi_transmit_async((uint8_t)(s >> 16));
-		spi_transmit_async((uint8_t)(s >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(s));
-		spi_transmit((uint8_t)(s >> 8));
-		spi_transmit((uint8_t)(s >> 16));
-		spi_transmit((uint8_t)(s >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(s)
 
 	EVE_inc_cmdoffset(4);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 void EVE_cmd_appendf(uint32_t ptr, uint32_t num)
 {
 	EVE_start_cmd(CMD_APPENDF);
-
-	if(cmd_burst)
-	{
-		spi_transmit_async((uint8_t)(ptr));
-		spi_transmit_async((uint8_t)(ptr >> 8));
-		spi_transmit_async((uint8_t)(ptr >> 16));
-		spi_transmit_async((uint8_t)(ptr >> 24));
-
-		spi_transmit_async((uint8_t)(num));
-		spi_transmit_async((uint8_t)(num >> 8));
-		spi_transmit_async((uint8_t)(num >> 16));
-		spi_transmit_async((uint8_t)(num >> 24));
-	}
-	else
-	{
-		spi_transmit((uint8_t)(ptr));
-		spi_transmit((uint8_t)(ptr >> 8));
-		spi_transmit((uint8_t)(ptr >> 16));
-		spi_transmit((uint8_t)(ptr >> 24));
-
-		spi_transmit((uint8_t)(num));
-		spi_transmit((uint8_t)(num >> 8));
-		spi_transmit((uint8_t)(num >> 16));
-		spi_transmit((uint8_t)(num >> 24));
-
-		EVE_cs_clear();
-	}
+	BUFFER_SPI_DWORD(ptr)
+	BUFFER_SPI_DWORD(num)
 
 	EVE_inc_cmdoffset(8);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -3596,180 +2272,72 @@ void EVE_cmd_appendf(uint32_t ptr, uint32_t num)
 /* warning! meta-command! this is a sequence of display-list commands to simplify use at the price of some overhead */
 void EVE_cmd_point(int16_t x0, int16_t y0, uint16_t size)
 {
-	uint32_t calc;
-
 	EVE_start_cmd((DL_BEGIN | EVE_POINTS));
-
-	if(cmd_burst)
-	{
-		calc = POINT_SIZE(size*16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x0 * 16, y0 * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
-
-		spi_transmit_async((uint8_t)(DL_END));
-		spi_transmit_async((uint8_t)(DL_END >> 8));
-		spi_transmit_async((uint8_t)(DL_END >> 16));
-		spi_transmit_async((uint8_t)(DL_END >> 24));
-	}
-	else
-	{
-		calc = POINT_SIZE(size*16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x0 * 16, y0 * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		spi_transmit((uint8_t)(DL_END));
-		spi_transmit((uint8_t)(DL_END >> 8));
-		spi_transmit((uint8_t)(DL_END >> 16));
-		spi_transmit((uint8_t)(DL_END >> 24));
-
-		EVE_cs_clear();
-	}
+	
+	uint32_t calc = POINT_SIZE(size*16);
+	BUFFER_SPI_DWORD(calc)
+	
+	calc = VERTEX2F(x0 * 16, y0 * 16);
+	BUFFER_SPI_DWORD(calc)
+	
+	BUFFER_SPI_DWORD(DL_END)
 
 	EVE_inc_cmdoffset(12);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 /* warning! meta-command! this is a sequence of display-list commands to simplify use at the price of some overhead */
 void EVE_cmd_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t width)
 {
-	uint32_t calc;
-
 	EVE_start_cmd((DL_BEGIN | EVE_LINES));
 
-	if(cmd_burst)
-	{
-		calc = LINE_WIDTH(width * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
+	uint32_t calc = LINE_WIDTH(width * 16);
+	BUFFER_SPI_DWORD(calc)
+	
+	calc = VERTEX2F(x0 * 16, y0 * 16);
+	BUFFER_SPI_DWORD(calc)
 
-		calc = VERTEX2F(x0 * 16, y0 * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x1 * 16, y1 * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
-
-		spi_transmit_async((uint8_t)(DL_END));
-		spi_transmit_async((uint8_t)(DL_END >> 8));
-		spi_transmit_async((uint8_t)(DL_END >> 16));
-		spi_transmit_async((uint8_t)(DL_END >> 24));
-	}
-	else
-	{
-		calc = LINE_WIDTH(width * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x0 * 16, y0 * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x1 * 16, y1 * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		spi_transmit((uint8_t)(DL_END));
-		spi_transmit((uint8_t)(DL_END >> 8));
-		spi_transmit((uint8_t)(DL_END >> 16));
-		spi_transmit((uint8_t)(DL_END >> 24));
-
-		EVE_cs_clear();
-	}
+	calc = VERTEX2F(x1 * 16, y1 * 16);
+	BUFFER_SPI_DWORD(calc)
+	
+	BUFFER_SPI_DWORD(DL_END)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
 /* warning! meta-command! this is a sequence of display-list commands to simplify use at the price of some overhead */
 void EVE_cmd_rect(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t corner)
 {
-	uint32_t calc;
-
 	EVE_start_cmd((DL_BEGIN | EVE_RECTS));
 
-	if(cmd_burst)
-	{
-		calc = LINE_WIDTH(corner * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
+	uint32_t calc = LINE_WIDTH(corner * 16);
+	BUFFER_SPI_DWORD(calc)
+	
+	calc = VERTEX2F(x0 * 16, y0 * 16);
+	BUFFER_SPI_DWORD(calc)
 
-		calc = VERTEX2F(x0 * 16, y0 * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x1 * 16, y1 * 16);
-		spi_transmit_async((uint8_t)(calc));
-		spi_transmit_async((uint8_t)(calc >> 8));
-		spi_transmit_async((uint8_t)(calc >> 16));
-		spi_transmit_async((uint8_t)(calc >> 24));
-
-		spi_transmit_async((uint8_t)(DL_END));
-		spi_transmit_async((uint8_t)(DL_END >> 8));
-		spi_transmit_async((uint8_t)(DL_END >> 16));
-		spi_transmit_async((uint8_t)(DL_END >> 24));
-	}
-	else
-	{
-		calc = LINE_WIDTH(corner * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x0 * 16, y0 * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		calc = VERTEX2F(x1 * 16, y1 * 16);
-		spi_transmit((uint8_t)(calc));
-		spi_transmit((uint8_t)(calc >> 8));
-		spi_transmit((uint8_t)(calc >> 16));
-		spi_transmit((uint8_t)(calc >> 24));
-
-		spi_transmit((uint8_t)(DL_END));
-		spi_transmit((uint8_t)(DL_END >> 8));
-		spi_transmit((uint8_t)(DL_END >> 16));
-		spi_transmit((uint8_t)(DL_END >> 24));
-
-		EVE_cs_clear();
-	}
+	calc = VERTEX2F(x1 * 16, y1 * 16);
+	BUFFER_SPI_DWORD(calc)
+	
+	BUFFER_SPI_DWORD(DL_END)
 
 	EVE_inc_cmdoffset(16);
+
+	if(!cmd_burst)
+	{
+		SEND_SPI_BUFFER()
+	}
 }
 
 
@@ -3795,15 +2363,16 @@ void EVE_calibrate_manual(uint16_t height)
 	/* these values determine where your calibration points will be drawn on your display */
 	displayX[0] = (EVE_HSIZE * 0.15);
 	displayY[0] = (height * 0.15);
-	
+
 	displayX[1] = (EVE_HSIZE * 0.85);
 	displayY[1] = (height / 2);
-	
+
 	displayX[2] = (EVE_HSIZE / 2);
 	displayY[2] = (height * 0.85);
 
 	while (count < 3)
 	{
+		// immediate transfer mode
 		EVE_cmd_dl(CMD_DLSTART);
 		EVE_cmd_dl(DL_CLEAR_RGB | 0x000000);
 		EVE_cmd_dl(DL_CLEAR | CLR_COL | CLR_STN | CLR_TAG);
@@ -3818,15 +2387,15 @@ void EVE_calibrate_manual(uint16_t height)
 		EVE_cmd_text((EVE_HSIZE/2), 50, 27, EVE_OPT_CENTER, "Please tap on the dot.");
 		num[0] = count + 0x31; num[1] = 0; /* null terminated string of one character */
 		EVE_cmd_text(displayX[count], displayY[count], 27, EVE_OPT_CENTER, num);
-		
+
 		EVE_cmd_dl(DL_DISPLAY);
 		EVE_cmd_dl(CMD_SWAP);
 		EVE_cmd_execute();
-		
+
 		while(1)
 		{
 			touchValue = EVE_memRead32(REG_TOUCH_DIRECT_XY); /* read for any new touch tag inputs */
-			
+
 			if(touch_lock)
 			{
 				if(touchValue & 0x80000000) /* check if we have no touch */
@@ -3867,7 +2436,7 @@ void EVE_calibrate_manual(uint16_t height)
 
 	tmp = ((touchY[0] * (((touchX[2] * displayY[1]) - (touchX[1] * displayY[2])))) + (touchY[1] * (((touchX[0] * displayY[2]) - (touchX[2] * displayY[0])))) + (touchY[2] * (((touchX[1] * displayY[0]) - (touchX[0] * displayY[1])))));
 	TransMatrix[5] = ((int64_t)tmp << 16) / k;
-	
+
 	EVE_memWrite32(REG_TOUCH_TRANSFORM_A, TransMatrix[0]);
 	EVE_memWrite32(REG_TOUCH_TRANSFORM_B, TransMatrix[1]);
 	EVE_memWrite32(REG_TOUCH_TRANSFORM_C, TransMatrix[2]);

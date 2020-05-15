@@ -72,6 +72,10 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR TH
 - commented out the NOP macro as it was colliding with ESP32 includes
 
 */
+#if defined (ESP_PLATFORM )
+#include <stddef.h>
+#include <stdint.h>
+#endif
 
 #include "EVE_target.h"
 #include "EVE_config.h"

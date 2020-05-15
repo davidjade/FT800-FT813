@@ -48,6 +48,9 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR TH
 #ifndef EVE_CONFIG_H_
 #define EVE_CONFIG_H_
 
+#define SPI_TRANSER_SIZE 4094			// use ESP32 DMA default transfer size
+#define BLOCK_TRANSFER_SIZE 3840		// CMD buffer space to use for transfers
+#define SPI_BUFFER_SIZE 512				// size in bytes (multiples of 4) of SPI transaction buffer for streaming commands
 
 /* select the settings for the TFT attached */
 #if 0
@@ -101,7 +104,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR TH
 	#define EVE_CONNECTEVE
 #endif
 
-#define EVE_CFAF800480E0_050SC
+#define EVE_FT811CB_HY50HD
 
 
 /* display timing parameters below */

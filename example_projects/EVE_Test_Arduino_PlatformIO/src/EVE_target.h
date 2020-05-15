@@ -813,8 +813,46 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR TH
 	#include <stdio.h>
 	#include <SPI.h>
 
-	#define EVE_CS 		9
-	#define EVE_PDN		8
+	#define EVE_CS 		5
+	#define EVE_PDN		15
+
+	typedef enum _spi_send_flag_t
+	{
+		SPI_SEND_QUEUED			= 0x00000000,
+		SPI_SEND_POLLING		= 0x00000001,
+		SPI_SEND_SYNCHRONOUS	= 0x00000002,
+		SPI_RESERVED			= 0x00000004,		// reserved
+		SPI_RECEIVE				= 0x00000008,
+		SPI_CMD_8				= 0x00000010,		// reserved - not yet implemented
+		SPI_CMD_16				= 0x00000020,		// reserved - not yet implemented
+		SPI_ADDRESS_8			= 0x00000040,		// reserved - not yet implemented
+		SPI_ADDRESS_16			= 0x00000080,		// reserved - not yet implemented
+		SPI_ADDRESS_24			= 0x00000100,
+		SPI_ADDRESS_32			= 0x00000200,		// reserved - not yet implemented
+		SPI_MODE_DIO			= 0x00000400,		// reserved - not yet implemented
+		SPI_MODE_QIO			= 0x00000800,		// reserved - not yet implemented
+		SPI_MODE_DIOQIO_ADDR	= 0x00001000,		// reserved - not yet implemented
+	} spi_send_flag_t;
+
+	typedef struct _spi_read_data
+	{
+		uint8_t _dummy_byte;
+		union
+		{
+			uint8_t 	byte;
+			uint16_t	word;
+			uint32_t	dword;
+		} __attribute__((packed));					// Note: this packing and alignment ensures that the data will be DMA-able
+	} spi_read_data __attribute__((aligned(4)));
+
+	// receive data helpers
+	#define member_size(type, member) sizeof(((type *)0)->member)
+
+	#define SPI_READ_DUMMY_LEN 	member_size(spi_read_data, _dummy_byte)
+	#define SPI_READ_BYTE_LEN 	(SPI_READ_DUMMY_LEN + member_size(spi_read_data, byte))
+	#define SPI_READ_WORD_LEN 	(SPI_READ_DUMMY_LEN + member_size(spi_read_data, word))
+	#define SPI_READ_DWORD_LEN 	(SPI_READ_DUMMY_LEN + member_size(spi_read_data, dword))
+
 
 	#define DELAY_MS(ms) delay(ms)
 
@@ -848,44 +886,33 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR TH
 		digitalWrite(EVE_CS, HIGH);
 	}
 
-	#if defined (ESP8266)
-		static inline void spi_transmit_async(uint8_t data)
-		{
-			SPI.write(data);
-		}
-
-		static inline void spi_transmit(uint8_t data)
-		{
-			SPI.write(data);
-		}
-	#else
-		static inline void spi_transmit_async(uint8_t data)
-		{
-			SPI.transfer(data);
-		}
-
-		static inline void spi_transmit(uint8_t data)
-		{
-			SPI.transfer(data);
-		}
-	#endif
-
-	static inline uint8_t spi_receive(uint8_t data)
+	static inline void spi_wait_for_pending_transactions()
 	{
-		return SPI.transfer(data);
+		// only used to wait for DMA completion, which isn't used in Arduino
 	}
 
-	static inline uint8_t fetch_flash_byte(const uint8_t *data)
+	// really should not be inline (too big) but, that's how this project was set up
+	static inline void spi_transaction(const uint8_t* data, uint16_t length, spi_send_flag_t flags, spi_read_data* out, uint64_t addr)
 	{
-		#if	defined (__AVR__)
-			#if defined(RAMPZ)
-				return(pgm_read_byte_far(data));
-			#else
-				return(pgm_read_byte_near(data));
-			#endif
-		#else /* this may fail on your Arduino system that is not AVR and that I am not aware of */
-			return *data;
-		#endif
+		EVE_cs_set();
+	
+		if(flags & SPI_ADDRESS_24)
+		{
+			uint8_t addr_bytes[] = { (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)(addr) };
+			SPI.transferBytes(addr_bytes, NULL, sizeof(addr_bytes));
+		}
+
+		if(flags & SPI_RECEIVE)
+		{
+			assert(out != NULL);
+			SPI.transferBytes(NULL, (uint8_t*)out, length);
+		}
+		else
+		{
+			SPI.transferBytes((uint8_t*)data, NULL, length);
+		}
+		
+		EVE_cs_clear();
 	}
 
 #endif /* Arduino */

@@ -20,8 +20,10 @@ void setup()
 	pinMode(EVE_PDN, OUTPUT);
 	
 	SPI.begin(); /* sets up the SPI to run in Mode 0 and 1 MHz */
-	SPI.setClockDivider(SPI_CLOCK_DIV2); /* speed up SPI */
+	//SPI.setClockDivider(SPI_CLOCK_DIV2); /* speed up SPI */
 	
+	SPI.setFrequency(16000000);
+
 	TFT_init();
 }
 

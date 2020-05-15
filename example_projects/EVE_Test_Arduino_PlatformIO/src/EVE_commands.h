@@ -113,7 +113,10 @@ uint32_t EVE_memRead32(uint32_t ftAddress);
 void EVE_memWrite8(uint32_t ftAddress, uint8_t ftData8);
 void EVE_memWrite16(uint32_t ftAddress, uint16_t ftData16);
 void EVE_memWrite32(uint32_t ftAddress, uint32_t ftData32);
-void EVE_memWrite_flash_buffer(uint32_t ftAddress, const uint8_t *data, uint16_t len);
+#if	defined (__AVR__)
+void EVE_memWrite_flash_buffer(uint32_t ftAddress, const uint8_t *data, uint32_t len);
+#endif
+void EVE_memWrite_buffer(uint32_t ftAddress, const uint8_t *data, uint32_t len);
 uint8_t EVE_busy(void);
 void EVE_get_cmdoffset(void);
 uint16_t EVE_report_cmdoffset(void);
@@ -123,7 +126,7 @@ uint32_t EVE_get_touch_tag(uint8_t num) __attribute__ ((deprecated("use EVE_memR
 /* commands to operate on memory: */
 void EVE_cmd_memzero(uint32_t ptr, uint32_t num);
 void EVE_cmd_memset(uint32_t ptr, uint8_t value, uint32_t num);
-/*(void EVE_cmd_memwrite(uint32_t dest, uint32_t num, const uint8_t *data); */
+void EVE_cmd_memwrite(uint32_t dest, uint32_t num, const uint8_t *data); 
 void EVE_cmd_memcpy(uint32_t dest, uint32_t src, uint32_t num);
 
 
